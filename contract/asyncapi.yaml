@@ -1,0 +1,125 @@
+asyncapi: "3.0.0"
+info:
+  title: terraOS Bus Contract
+  version: 0.3.0
+  description: |
+    Contrato del bus MQTT de terraOS. Toda comunicación sim/edge/cerebro pasa por aquí.
+    Namespace: terra/{tenant}/{module}/{device}/{metric}/{kind}
+    - tenant: slug de finca (demo en Fase 0)
+    - module: mod-1..mod-4
+    - device: ec-01, ph-01, temp-01, level-01, flow-01, climate-01,
+              pump-recirc-01, valve-fill-01, doser-a-01, doser-b-01, doser-ph-01, cam-01
+    - metric: ec | ph | temp | level | flow | air_temp | humidity | switch | photo | confidence
+    - kind: reading | event | status | confidence
+
+    Reglas:
+    - Solo lecturas instantáneas viajan por el bus. Historia y agregaciones: TimescaleDB.
+    - Actuadores reciben SOLO por cmd (con policy_id, desde el portero).
+      EXCEPCIÓN dev Fase 0: HA publica a request/set (payload ON/OFF) y el sim actúa de portero.
+    - Discovery de Home Assistant: homeassistant/{component}/{device_id}/config (retenido).
+    - Availability: cada dispositivo publica status online/offline retenido; offline también por LWT.
+    - Timestamps: epoch milisegundos (entero).
+servers:
+  mosquitto:
+    host: localhost:1883
+    protocol: mqtt
+channels:
+  reading:
+    address: terra/{tenant}/{module}/{device}/{metric}/reading
+    messages:
+      reading:
+        payload: { $ref: "#/components/schemas/Reading" }
+  event:
+    address: terra/{tenant}/{module}/{device}/{metric}/event
+    messages:
+      event:
+        payload: { $ref: "#/components/schemas/Event" }
+  status:
+    address: terra/{tenant}/{module}/{device}/status/status
+    messages:
+      status:
+        payload: { $ref: "#/components/schemas/Status" }
+  confidence:
+    address: terra/{tenant}/{module}/{device}/confidence/confidence
+    messages:
+      confidence:
+        payload: { $ref: "#/components/schemas/Confidence" }
+  cmd:
+    address: terra/{tenant}/{module}/{device}/cmd
+    messages:
+      cmd:
+        payload: { $ref: "#/components/schemas/Cmd" }
+  request:
+    address: terra/{tenant}/{module}/{device}/request/{action}
+    messages:
+      request:
+        payload: { $ref: "#/components/schemas/Request" }
+  haDiscovery:
+    address: homeassistant/{component}/{device_id}/config
+    messages:
+      haDiscovery:
+        payload: { $ref: "#/components/schemas/HaDiscovery" }
+components:
+  schemas:
+    Reading:
+      type: object
+      required: [v, ts]
+      properties:
+        v:
+          description: Valor numérico (sensores) u "ON"/"OFF" (estado de switch)
+        ts: { type: integer, description: epoch ms }
+    Event:
+      type: object
+      required: [name, ts]
+      properties:
+        name: { type: string }
+        ts: { type: integer }
+        detail: { type: object, additionalProperties: true }
+    Status:
+      type: object
+      required: [state, ts]
+      properties:
+        state: { type: string, enum: [online, offline, error] }
+        ts: { type: integer }
+        meta: { type: object, additionalProperties: true }
+    Confidence:
+      type: object
+      required: [v, ts]
+      properties:
+        v: { type: number, minimum: 0, maximum: 100 }
+        ts: { type: integer }
+        sources:
+          type: object
+          additionalProperties: { type: number }
+          description: desglose por fuente (ADR-0010). Fase 0 sim publica self=100.
+    Cmd:
+      type: object
+      required: [action, policy_id]
+      properties:
+        action: { type: string, enum: [start, stop, set] }
+        policy_id: { type: string }
+        params: { type: object, additionalProperties: true }
+    Request:
+      type: object
+      description: |
+        Solicitud humana (ADR-0009). Actuador: action=start|stop|set. Sensor: read|calibrate.
+        Camara: capture. En dev Fase 0, HA switch publica payload crudo ON/OFF a request/set.
+      additionalProperties: true
+    HaDiscovery:
+      type: object
+      description: Config de discovery de Home Assistant (sensor/switch/camera)
+      additionalProperties: true
+
+  deviceMetrics:
+    description: |
+      Mapa dispositivo -> metricas que publica:
+      ec-01: [ec]                      (mS/cm)
+      ph-01: [ph]
+      temp-01: [temp]                  (°C agua)
+      level-01: [level]                (% tanque)
+      flow-01: [flow]                  (L/min, 0 cuando recirculación apagada)
+      climate-01: [air_temp, humidity] (°C aire, %HR)
+      pump-recirc-01: [switch]
+      valve-fill-01: [switch]
+      doser-a-01, doser-b-01, doser-ph-01: [switch]  (ON durante pulsos de dosificación)
+      cam-01: [photo]                  (event: captura; imagen va a MinIO, Fase 0 solo evento)

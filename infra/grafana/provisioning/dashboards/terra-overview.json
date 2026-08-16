@@ -1,0 +1,76 @@
+{
+  "title": "Terra Overview",
+  "uid": "terra-overview",
+  "tags": ["terraos"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "EC mS/cm por modulo",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "timescale" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "si:mS/cm" }, "overrides": [] },
+      "targets": [
+        {
+          "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'ec' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "pH por modulo",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "timescale" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 14 }, "overrides": [] },
+      "targets": [
+        {
+          "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'ph' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Nivel tanque %",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "timescale" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        {
+          "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'level' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Temp aire °C",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "timescale" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "celsius" }, "overrides": [] },
+      "targets": [
+        {
+          "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'air_temp' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+default_config:
+
+# NOTA: HA moderno no acepta `mqtt: broker:` en YAML — el broker se conecta por UI:
+# Settings → Devices & Services → Add Integration → MQTT → broker `mosquitto`, puerto 1883.
+# Con discovery activo (default), las entidades del sim aparecen solas tras conectar.
+
+logger:
+  default: info

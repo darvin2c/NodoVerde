@@ -1,0 +1,4 @@
+name: ec_baja
+description: Consumo x2 sin auto-dosificar, EC cae bajo rango
+ec_consumption_mul: 2
+disable_auto_dose: true

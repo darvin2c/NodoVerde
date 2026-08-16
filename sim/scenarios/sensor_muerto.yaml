@@ -1,0 +1,8 @@
+name: sensor_muerto
+description: mod-2/ec-01 deja de publicar y pasa a offline a los 5min-sim
+ec_consumption_mul: 1
+disable_auto_dose: false
+sensor_dead:
+  module: mod-2
+  device: ec-01
+  after_sim_sec: 300

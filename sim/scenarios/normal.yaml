@@ -1,0 +1,4 @@
+name: normal
+description: Operación nominal, todo sano
+ec_consumption_mul: 1
+disable_auto_dose: false

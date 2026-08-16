@@ -1,0 +1,19 @@
+# --- Secretos ---
+.env
+*.local
+
+# --- Dependencias ---
+node_modules/
+__pycache__/
+*.pyc
+
+# --- Estado y datos generados (reproducibles) ---
+# estado persistido del sim + caché de clima
+sim/data/
+# datos del bucket
+minio/data/
+homeassistant/config/
+
+# --- Runtime / logs ---
+*.log
+.DS_Store
