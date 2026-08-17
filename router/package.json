@@ -1,0 +1,22 @@
+{
+  "name": "terra-router",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "terraOS router de identidad — traduce plano dispositivo (hw_id) ↔ plano interno (tenant/módulo)",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vitest": "^3.1.1"
+  }
+}

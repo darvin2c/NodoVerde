@@ -129,7 +129,7 @@ export function stepModule(
   et0Rate: number, // mm/h actual (resuelto por el llamador desde la serie de clima)
   climate: { airTemp: number; humidity: number },
   params: SimParams = DEFAULT_PARAMS,
-  scenario?: { ecConsumptionMul?: number; disableAutoDose?: boolean },
+  scenario?: { ecConsumptionMul?: number },
 ): ModuleState {
   const next = { ...state };
   const dtHours = dtSimSec / 3600;

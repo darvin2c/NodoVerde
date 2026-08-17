@@ -28,7 +28,7 @@ Desarrollar y probar sin hardware exige un gemelo digital del campo. Requisitos:
 2. **Estocástica**: ruido AR(1)/Ornstein-Uhlenbeck correlacionado, deriva de calibración, fallos con cadenas de Markov (batería, muerte gradual, dropout).
 3. **IA solo donde aporta**: imágenes de cámaras (diferido al backlog) y narrativa de escenarios (diferido). v1: biblioteca de fotos reales etiquetadas + escenarios YAML.
 
-**Perfiles de cultivo como configuración** (`config/crops/*.yaml`): rangos EC/pH, temperatura máxima de agua, ciclo, etapas. Cambiar de cultivo = apuntar el módulo a otro YAML. Sim, cerebro y portero leen el mismo perfil. Perfiles iniciales: lechuga y tomate hidropónico.
+**Perfiles de cultivo como configuración** (`sim/config/crops/*.yaml`): rangos EC/pH, temperatura máxima de agua, ciclo, etapas. Cambiar de cultivo = apuntar el módulo a otro YAML. ~~Sim, cerebro y portero leen el mismo perfil~~ *(enmendado por ADR-0016: solo el sim lee YAML; cerebro y portero leen la tabla `crop_profiles` de la DB, aprovisionada desde esos YAML — ningún componente de producción comparte archivos con el fierro)*. Perfiles iniciales: lechuga y tomate hidropónico.
 
 Propiedades obligatorias: estado persistente (sobrevive reinicios), RNG con semilla fija (corridas reproducibles), fault injection como API (`sim.inject("sensor_muerto", parcela=2, dia=3)`), lazo cerrado (regar → humedad sube).
 

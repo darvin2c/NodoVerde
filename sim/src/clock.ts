@@ -35,12 +35,3 @@ export class SimClock {
     return ((this.simMs / 3_600_000) % 24 + 24) % 24;
   }
 }
-
-// factory para reproducibilidad: usa seed para offset inicial? por ahora epoch fijo
-export function createClock(speed: number, seed?: number): SimClock {
-  // sim start at 2024-08-01 00:00 local? use fixed epoch
-  const initial = Date.UTC(2024, 7, 1, 0, 0, 0); // 2024-08-01 00:00 UTC
-  // optional jitter by seed (small) to avoid same hour start always? not needed
-  void seed;
-  return new SimClock(initial, speed);
-}

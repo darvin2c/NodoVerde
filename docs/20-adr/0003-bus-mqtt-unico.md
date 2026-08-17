@@ -23,7 +23,7 @@ El sistema necesita mover telemetría, comandos y eventos entre campo, data plan
 
 **MQTT (Mosquitto) como único bus.** NATS eliminado (solo evidencia de que MQTT no basta lo resucita). Los buses internos de OpenClaw y HA nunca salen de su proceso.
 
-Todo mensaje que cruza el bus MUST cumplir [docs/30-specs/asyncapi.yaml](../30-specs/asyncapi.yaml). Ningún PR cambia un mensaje sin actualizar el spec en el mismo commit.
+Todo mensaje que cruza el bus MUST cumplir [contract/asyncapi.yaml](../../contract/asyncapi.yaml) (v0.4.0: dos planos — dispositivo `hw_id` e interno `tenant/module`, ver ADR-0015). Ningún PR cambia un mensaje sin actualizar el spec en el mismo commit.
 
 Propiedad clave: el simulador y el hardware real publican por el mismo adapter y el mismo contrato — capas superiores no distinguen sim de real.
 

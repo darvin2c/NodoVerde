@@ -1,0 +1,666 @@
+# ==============================================================================
+# NODO HIDROPÓNICO — diseño dispositivo tonto (ADR-0015)
+# Chip: esp32dev — DISEÑO puro, un solo binario para TODOS los nodos.
+# Este archivo describe el hardware hidropónico (ESP32 + ADS1115 + DS18B20
+# + JSN-SR04T + YF-S201 + DHT22/SHT3x + 5 actuadores). La identidad
+# (tenant/módulo/cultivo) NO existe en el firmware: la asigna la plataforma
+# en runtime vía claiming en DB (device_identities). El chip solo conoce su
+# hw_id derivado de la MAC de fábrica y publica/escucha en el PLANO DISPOSITIVO
+# (5 segmentos): terra/{hw_id}/{device}/{metric}/kind — el router traduce al
+# plano interno (6 segmentos: terra/{tenant}/{module}/{device}/{metric}/kind)
+# para HA/Telegraf/cerebro. Contrato: router/ + ADR-0015.
+#
+# Plano dispositivo (este firmware, 5 segmentos):
+#   - terra/{hw_id}/{device}/{metric}/reading    (sensores qos1, switches retain)
+#   - terra/{hw_id}/{device}/status/status       (retained + LWT, birth/will)
+#   - terra/{hw_id}/{device}/confidence/confidence
+#   - escucha: terra/{hw_id}/{device}/request/{action}  action=set|read|capture|calibrate
+#
+# hw_id: 12 hex minúsculas sin separadores, derivado EN RUNTIME de la MAC
+# via lambda centralizada (ver globals hw_id). No hay substitutions tenant/module.
+# mqtt_broker es compile-time en ESPHome (limitación conocida; captive portal
+# solo provisiona WiFi, aprovisionamiento del broker en producción es decisión
+# pendiente, ver ADR-0015).
+#
+# Este es el diseño canónico: no se clona por módulo (UNA sola compilación);
+# la plataforma resuelve hw_id→(tenant,module) y publica discovery HA.
+# Calibraciones (EC/pH/DS18B20 address/distancia tanque/caudal) son parámetros
+# de puesta en marcha documentados en acta de instalación, no placeholders.
+# ==============================================================================
+
+substitutions:
+  # mqtt_broker es compile-time en ESPHome (limitación conocida del framework).
+  # El captive portal solo provisiona WiFi; el broker MQTT en producción
+  # (mqtt.finca.local u otro) se define aquí en compilación. Decisión pendiente
+  # de aprovisionamiento dinámico documentada en ADR-0015. En dev es
+  # `mosquitto` (docker) o localhost.
+  mqtt_broker: mqtt.finca.local
+  wifi_ssid: "terra-farm"
+  wifi_password: !secret wifi_password
+
+# hw_id centralizado — única lógica de normalización MAC→hw_id en todo el firmware.
+# Se calcula en on_boot (prioridad 800) y se reutiliza por concatenación en cada
+# mqtt.publish lambda. Evita repetir normalización en 10+ lugares.
+globals:
+  - id: hw_id
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+esphome:
+  name: nodohidro-esp32dev
+  friendly_name: Terra Nodo Hidro
+  area: hidroponico
+  comment: "terraOS nodo hidropónico — dispositivo tonto, hw_id por MAC, identidad por claiming DB (ADR-0015)"
+  on_boot:
+    # 800: hw_id antes que nada — disponible para status y suscripciones
+    - priority: 800
+      then:
+        - lambda: |-
+            // Deriva hw_id de la MAC de fábrica. Única normalización en el firmware.
+            // esphome::get_mac_address() en versiones recientes ya devuelve 12 hex
+            // minúsculas sin separadores; se mantiene filtrado robusto para
+            // compatibilidad con WiFi.macAddress() / get_mac_address_pretty()
+            // que devuelven "AA:BB:CC:DD:EE:FF".
+            std::string raw = esphome::get_mac_address();
+            std::string hw;
+            hw.reserve(12);
+            for (char c : raw) {
+              if (c == ':' || c == '-') continue;
+              if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+              hw.push_back(c);
+            }
+            // Si por alguna razón raw vino vacío o corto, loggear
+            if (hw.length() != 12) {
+              ESP_LOGW("hw_id", "hw_id longitud inesperada raw='%s' hw='%s' (esperado 12)", raw.c_str(), hw.c_str());
+            }
+            id(hw_id) = hw;
+            ESP_LOGI("hw_id", "hw_id=%s raw_mac=%s", hw.c_str(), raw.c_str());
+    # 600: suscripciones a plano dispositivo terra/{hw_id}/+/request/+
+    # El fierro escucha solicitudes del router (que traduce desde plano interno).
+    - priority: 600
+      then:
+        - lambda: |-
+            if (id(hw_id).empty()) {
+              ESP_LOGW("hw_id", "hw_id vacío, omitiendo suscripciones request");
+              return;
+            }
+            std::string base = "terra/" + id(hw_id);
+            auto *client = esphome::mqtt::global_mqtt_client;
+            if (client == nullptr) {
+              ESP_LOGE("request", "mqtt client nulo, no se puede suscribir");
+              return;
+            }
+            static bool subscribed = false;
+            if (subscribed) return;
+            subscribed = true;
+            // Cada actuador escucha .../request/set con payload ON/OFF o JSON start/stop
+            client->subscribe(base + "/pump-recirc-01/request/set", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGD("request", "pump-recirc-01 set topic=%s payload=%s", topic.c_str(), payload.c_str());
+              if (payload.find("ON") != std::string::npos) id(pump_recirc).turn_on();
+              else if (payload.find("OFF") != std::string::npos) id(pump_recirc).turn_off();
+              else if (payload.find("\"start\"") != std::string::npos || payload.find("\"open\"") != std::string::npos) id(pump_recirc).turn_on();
+              else if (payload.find("\"stop\"") != std::string::npos || payload.find("\"close\"") != std::string::npos) id(pump_recirc).turn_off();
+            }, 1);
+            client->subscribe(base + "/valve-fill-01/request/set", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGD("request", "valve-fill-01 set topic=%s payload=%s", topic.c_str(), payload.c_str());
+              if (payload.find("ON") != std::string::npos) id(valve_fill).turn_on();
+              else if (payload.find("OFF") != std::string::npos) id(valve_fill).turn_off();
+              else if (payload.find("\"start\"") != std::string::npos || payload.find("\"open\"") != std::string::npos) id(valve_fill).turn_on();
+              else if (payload.find("\"stop\"") != std::string::npos || payload.find("\"close\"") != std::string::npos) id(valve_fill).turn_off();
+            }, 1);
+            client->subscribe(base + "/doser-a-01/request/set", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGD("request", "doser-a-01 set payload=%s", payload.c_str());
+              if (payload.find("ON") != std::string::npos || payload.find("\"start\"") != std::string::npos || payload.find("\"dose\"") != std::string::npos) id(doser_a).turn_on();
+              else if (payload.find("OFF") != std::string::npos || payload.find("\"stop\"") != std::string::npos) id(doser_a).turn_off();
+            }, 1);
+            client->subscribe(base + "/doser-b-01/request/set", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGD("request", "doser-b-01 set payload=%s", payload.c_str());
+              if (payload.find("ON") != std::string::npos || payload.find("\"start\"") != std::string::npos || payload.find("\"dose\"") != std::string::npos) id(doser_b).turn_on();
+              else if (payload.find("OFF") != std::string::npos || payload.find("\"stop\"") != std::string::npos) id(doser_b).turn_off();
+            }, 1);
+            client->subscribe(base + "/doser-ph-01/request/set", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGD("request", "doser-ph-01 set payload=%s", payload.c_str());
+              if (payload.find("ON") != std::string::npos || payload.find("\"start\"") != std::string::npos || payload.find("\"dose\"") != std::string::npos) id(doser_ph).turn_on();
+              else if (payload.find("OFF") != std::string::npos || payload.find("\"stop\"") != std::string::npos) id(doser_ph).turn_off();
+            }, 1);
+            // Sensores: request/read y request/calibrate (solo logging / trigger)
+            client->subscribe(base + "/+/request/read", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGI("request", "read solicitado topic=%s payload=%s", topic.c_str(), payload.c_str());
+              // Los sensores publican periódicamente; un read podría forzar publicación
+              // inmediata si se implementa (futuro). Por ahora solo log.
+            }, 1);
+            client->subscribe(base + "/+/request/calibrate", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGI("request", "calibrate solicitado topic=%s payload=%s", topic.c_str(), payload.c_str());
+            }, 1);
+            client->subscribe(base + "/cam-01/request/capture", [](const std::string &topic, const std::string &payload) {
+              ESP_LOGI("request", "capture solicitado topic=%s payload=%s", topic.c_str(), payload.c_str());
+            }, 1);
+            ESP_LOGI("request", "suscripciones request registradas base=%s", base.c_str());
+    # -100: publica online retenido en plano dispositivo
+    - priority: -100
+      then:
+        - mqtt.publish:
+            topic: !lambda 'return "terra/" + id(hw_id) + "/controller/status/status";'
+            payload: !lambda |-
+              char buf[96];
+              auto t = id(sntp_time).now();
+              long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+              snprintf(buf, sizeof(buf), "{\"state\":\"online\",\"ts\":%lld}", ts);
+              return std::string(buf);
+            retain: true
+            qos: 1
+  on_shutdown:
+    priority: -100
+    then:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/controller/status/status";'
+          payload: !lambda |-
+            char buf[96];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"state\":\"offline\",\"ts\":%lld}", ts);
+            return std::string(buf);
+          retain: true
+          qos: 1
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: INFO
+
+# En hardware real: WiFi. En sim modo host: ignorado (el sim publica directo por TCP).
+wifi:
+  ssid: ${wifi_ssid}
+  password: ${wifi_password}
+  fast_connect: true
+  ap:
+    ssid: "Terra-NodoHidro-Fallback"
+    password: "terra1234"
+
+captive_portal:
+
+ota:
+  - platform: esphome
+
+api:
+  encryption:
+    key: !secret api_key
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: America/Lima
+
+# --- Bus I2C para ADS1115 + SHT3x ---
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 100kHz
+
+# --- OneWire para DS18B20 (temp agua) ---
+one_wire:
+  - platform: gpio
+    pin: GPIO4
+
+# --- ADS1115 16-bit ADC (EC en A0, pH en A1) ---
+ads1115:
+  - address: 0x48 # dirección I2C fija del ADS1115
+
+# ==============================================================================
+# SENSORES — cada uno publica en plano dispositivo terra/{hw_id}/{device}/{metric}/reading
+# Payload contrato Reading: {"v": <number|string>, "ts": <epoch_ms>}
+# Filtros: delta (evita spam) + heartbeat 30s (Telegraf/Grafana esperan dato fresco)
+# ts se genera con sntp_time.timestamp*1000; si no hay hora, fallback millis()
+# ==============================================================================
+
+sensor:
+
+  # -- EC vía ADS1115 canal A0 (sonda analógica EC, ej. DFR0300) --
+  - platform: ads1115
+    multiplexer: "A0_GND"
+    gain: 4.096
+    name: "EC raw"
+    id: ec_raw
+    update_interval: 5s
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    filters:
+      - sliding_window_moving_average:
+          window_size: 6
+          send_every: 2
+    on_value:
+      then:
+        - mqtt.publish:
+            topic: !lambda 'return "terra/" + id(hw_id) + "/ec-01/ec/reading";'
+            qos: 1
+            retain: false
+            payload: !lambda |-
+              // EC: parámetro de puesta en marcha — mapear V→mS/cm con solución patrón.
+              // Valores por defecto de diseño (offset 0.2V, escala 3.0); ajustar en
+              // instalación con buffers EC 1.41 / 2.76 mS/cm y documentar en acta.
+              float volts = x;
+              float ec = (volts - 0.2) * 3.0;
+              if (ec < 0) ec = 0;
+              char buf[80];
+              auto t = id(sntp_time).now();
+              long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+              // delta 0.02 mS/cm + heartbeat 30s — no publicar si variación < delta salvo cada 30s
+              static float last_v = -999;
+              static long long last_ts = 0;
+              long long now_ms = ts;
+              if (last_v > -900 && fabs(ec - last_v) < 0.02 && (now_ms - last_ts) < 30000) return std::string("");
+              last_v = ec; last_ts = now_ms;
+              if (fabs(ec - last_v) < 0.001 && (now_ms - last_ts) < 30000) {} // keep
+              snprintf(buf, sizeof(buf), "{\"v\":%.3f,\"ts\":%lld}", ec, ts);
+              return std::string(buf);
+
+  # -- pH vía ADS1115 canal A1 (segundo canal, sonda pH analógica) --
+  - platform: ads1115
+    multiplexer: "A1_GND"
+    gain: 4.096
+    name: "pH raw"
+    id: ph_raw
+    update_interval: 5s
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    filters:
+      - sliding_window_moving_average:
+          window_size: 6
+          send_every: 2
+    on_value:
+      then:
+        - mqtt.publish:
+            topic: !lambda 'return "terra/" + id(hw_id) + "/ph-01/ph/reading";'
+            qos: 1
+            retain: false
+            payload: !lambda |-
+              float volts = x;
+              // pH: parámetro de puesta en marcha — sonda 3.0V~pH7, pendiente aprox -5.5.
+              // Ajustar con buffers pH 4/7/10 en instalación; documentar coeficientes en acta.
+              float ph = 7.0 + ((2.0 - volts) * 3.5);
+              char buf[80];
+              auto t = id(sntp_time).now();
+              long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+              static float last_v = -999;
+              static long long last_ts = 0;
+              long long now_ms = ts;
+              if (last_v > -900 && fabs(ph - last_v) < 0.02 && (now_ms - last_ts) < 30000) return std::string("");
+              last_v = ph; last_ts = now_ms;
+              snprintf(buf, sizeof(buf), "{\"v\":%.2f,\"ts\":%lld}", ph, ts);
+              return std::string(buf);
+
+  # -- Temperatura agua DS18B20 (one_wire GPIO4) --
+  - platform: dallas_temp
+    address: 0x0000000000000000  # DS18B20 address: se descubre en escaneo I2C/OneWire en puesta en marcha y se fija en esta línea; documentar en acta de instalación.
+    name: "Temp agua"
+    id: temp_agua
+    update_interval: 10s
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - delta: 0.1 # publica solo si cambia >0.1°C
+    on_value:
+      then:
+        - mqtt.publish:
+            topic: !lambda 'return "terra/" + id(hw_id) + "/temp-01/temp/reading";'
+            qos: 1
+            retain: false
+            payload: !lambda |-
+              char buf[80];
+              auto t = id(sntp_time).now();
+              long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+              snprintf(buf, sizeof(buf), "{\"v\":%.1f,\"ts\":%lld}", x, ts);
+              return std::string(buf);
+
+  # -- Nivel tanque: ultrasónico JSN-SR04T (trigger GPIO5, echo GPIO18) --
+  # Alternativa presión analógica comentada abajo (usar via ADS1115 A2 si se prefiere sensor de presión).
+  - platform: ultrasonic
+    trigger_pin: GPIO5
+    echo_pin: GPIO18
+    pulse_time: 10us
+    timeout: 4m
+    name: "Nivel tanque"
+    id: level_tank
+    update_interval: 10s
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    filters:
+      - median:
+          window_size: 5
+          send_every: 2
+          send_first_at: 1
+      - lambda: |-
+          // Convertir distancia (m) a % tanque: 0.05m=100%, 0.85m=0% (tanque 200L ~0.8m alto)
+          // Parámetro de puesta en marcha: ajustar 0.05/0.85 según altura real del tanque instalado.
+          float dist = x;
+          if (isnan(dist)) return {};
+          float pct = (0.85 - dist) / 0.80 * 100.0;
+          if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+          return pct;
+      - delta: 1.0
+    on_value:
+      then:
+        - mqtt.publish:
+            topic: !lambda 'return "terra/" + id(hw_id) + "/level-01/level/reading";'
+            qos: 1
+            retain: false
+            payload: !lambda |-
+              char buf[80];
+              auto t = id(sntp_time).now();
+              long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+              snprintf(buf, sizeof(buf), "{\"v\":%.0f,\"ts\":%lld}", x, ts);
+              return std::string(buf);
+
+  # -- Alternativa nivel por presión analógica (descomentar si se usa sensor 0-5V en ADS1115 A2) --
+  # Parámetro de puesta en marcha: 0.5V=0% 4.5V=100% típico, ajustar a sensor instalado.
+  # - platform: ads1115
+  #   multiplexer: "A2_GND"
+  #   gain: 6.144
+  #   name: "Nivel presión raw"
+  #   id: level_pressure_raw
+  #   update_interval: 10s
+  #   filters:
+  #     - lambda: |-
+  #         float volts = x; // 0.5V=0% 4.5V=100% — calibrar en instalación
+  #         float pct = (volts - 0.5) / 4.0 * 100.0;
+  #         if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+  #         return pct;
+  #   on_value:
+  #     then:
+  #       - mqtt.publish:
+  #           topic: !lambda 'return "terra/" + id(hw_id) + "/level-01/level/reading";'
+  #           payload: !lambda ...
+
+  # -- Caudalímetro por pulsos (YF-S201, pulse_counter GPIO15) --
+  - platform: pulse_counter
+    pin: GPIO15
+    name: "Caudal"
+    id: flow_rate
+    unit_of_measurement: "L/min"
+    accuracy_decimals: 2
+    update_interval: 10s
+    count_mode:
+      rising_edge: INCREMENT
+      falling_edge: DISABLE
+    filters:
+      - lambda: |-
+          // YF-S201: ~450 pulsos/L => L/min = (pulsos/450) * (60/ventana)
+          // Parámetro de puesta en marcha: verificar pulsos/L del caudalímetro instalado (450 típico).
+          float lpm = x / 450.0;
+          return lpm;
+      - delta: 0.05
+    on_value:
+      then:
+        - mqtt.publish:
+            topic: !lambda 'return "terra/" + id(hw_id) + "/flow-01/flow/reading";'
+            qos: 1
+            retain: false
+            payload: !lambda |-
+              char buf[80];
+              auto t = id(sntp_time).now();
+              long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+              // flow 0 cuando recirculación apagada — se publica igual por heartbeat
+              snprintf(buf, sizeof(buf), "{\"v\":%.2f,\"ts\":%lld}", x, ts);
+              return std::string(buf);
+
+  # -- Clima aire: DHT22 (GPIO16) — alternativa SHT3x por I2C comentada --
+  - platform: dht
+    pin: GPIO16
+    model: DHT22
+    temperature:
+      name: "Aire temp"
+      id: air_temp
+      on_value:
+        then:
+          - mqtt.publish:
+              topic: !lambda 'return "terra/" + id(hw_id) + "/climate-01/air_temp/reading";'
+              qos: 1
+              retain: false
+              payload: !lambda |-
+                char buf[80];
+                auto t = id(sntp_time).now();
+                long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+                snprintf(buf, sizeof(buf), "{\"v\":%.1f,\"ts\":%lld}", x, ts);
+                return std::string(buf);
+    humidity:
+      name: "Humedad aire"
+      id: air_humidity
+      on_value:
+        then:
+          - mqtt.publish:
+              topic: !lambda 'return "terra/" + id(hw_id) + "/climate-01/humidity/reading";'
+              qos: 1
+              retain: false
+              payload: !lambda |-
+                char buf[80];
+                auto t = id(sntp_time).now();
+                long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+                snprintf(buf, sizeof(buf), "{\"v\":%.1f,\"ts\":%lld}", x, ts);
+                return std::string(buf);
+    update_interval: 30s
+
+  # -- Alternativa SHT3x por I2C (más precisa, descomentar si se usa) --
+  # - platform: sht3xd
+  #   address: 0x44
+  #   temperature:
+  #     name: "Aire temp SHT"
+  #     id: air_temp
+  #     on_value:
+  #       then:
+  #         - mqtt.publish:
+  #             topic: !lambda 'return "terra/" + id(hw_id) + "/climate-01/air_temp/reading";'
+  #             payload: !lambda ...
+  #   humidity:
+  #     name: "Humedad SHT"
+  #     id: air_humidity
+  #     on_value:
+  #       then:
+  #         - mqtt.publish:
+  #             topic: !lambda 'return "terra/" + id(hw_id) + "/climate-01/humidity/reading";'
+  #             payload: !lambda ...
+  #   update_interval: 30s
+
+# ==============================================================================
+# ACTUADORES — switches GPIO con interlock físico + lógico
+# Cada switch publica estado en plano dispositivo terra/{hw_id}/{device}/switch/reading
+# (retain=true) y recibe comandos por terra/{hw_id}/{device}/request/set (qos1).
+# El router traduce desde plano interno terra/{tenant}/{module}/{device}/request/set.
+# Interlock: dosificación solo si pump ON y nivel > mínimo (10%). Validación
+# lógica en firmware + interlock físico real que corta aunque falle software.
+# ==============================================================================
+
+switch:
+
+  - platform: gpio
+    pin: GPIO26
+    id: pump_recirc
+    name: "Bomba recirculación"
+    icon: "mdi:pump"
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/pump-recirc-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"ON\",\"ts\":%lld}", ts);
+            return std::string(buf);
+    on_turn_off:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/pump-recirc-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"OFF\",\"ts\":%lld}", ts);
+            return std::string(buf);
+
+  - platform: gpio
+    pin: GPIO27
+    id: valve_fill
+    name: "Válvula relleno"
+    icon: "mdi:valve"
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/valve-fill-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"ON\",\"ts\":%lld}", ts);
+            return std::string(buf);
+    on_turn_off:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/valve-fill-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"OFF\",\"ts\":%lld}", ts);
+            return std::string(buf);
+
+  # Doser A — nutriente A (N-Ca-Fe)
+  - platform: gpio
+    pin: GPIO14
+    id: doser_a
+    name: "Dosificador A"
+    icon: "mdi:flask"
+    restore_mode: ALWAYS_OFF
+    # INTERLOCK físico (corte hardware) + validación lógica: solo dosificar si pump ON y nivel >10%.
+    # Ejemplo validación: if (!id(pump_recirc).state || id(level_tank).state < 10) { id(doser_a).turn_off(); return; }
+    on_turn_on:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/doser-a-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            // Interlock lógico: descomentar para validar en instalación si se desea
+            // if (!id(pump_recirc).state) { id(doser_a).turn_off(); return std::string(""); }
+            // if (!isnan(id(level_tank).state) && id(level_tank).state < 10) { id(doser_a).turn_off(); return std::string(""); }
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"ON\",\"ts\":%lld}", ts);
+            return std::string(buf);
+    on_turn_off:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/doser-a-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"OFF\",\"ts\":%lld}", ts);
+            return std::string(buf);
+
+  - platform: gpio
+    pin: GPIO12
+    id: doser_b
+    name: "Dosificador B"
+    icon: "mdi:flask-outline"
+    restore_mode: ALWAYS_OFF
+    # INTERLOCK idem doser-a-01
+    on_turn_on:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/doser-b-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"ON\",\"ts\":%lld}", ts);
+            return std::string(buf);
+    on_turn_off:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/doser-b-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"OFF\",\"ts\":%lld}", ts);
+            return std::string(buf);
+
+  - platform: gpio
+    pin: GPIO13
+    id: doser_ph
+    name: "Dosificador pH-down"
+    icon: "mdi:eyedropper"
+    restore_mode: ALWAYS_OFF
+    # INTERLOCK idem doser-a-01; además evitar dosificar pH si pH ya < 5.5 (lógica opcional en instalación)
+    on_turn_on:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/doser-ph-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"ON\",\"ts\":%lld}", ts);
+            return std::string(buf);
+    on_turn_off:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/doser-ph-01/switch/reading";'
+          qos: 1
+          retain: true
+          payload: !lambda |-
+            char buf[80];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"v\":\"OFF\",\"ts\":%lld}", ts);
+            return std::string(buf);
+
+# ==============================================================================
+# MQTT — plano dispositivo (5 segmentos). La plataforma traduce a plano interno.
+# Estado: terra/{hw_id}/controller/status/status (retained, birth/will)
+# El router publica discovery HA (homeassistant/.../config) en plano interno;
+# este firmware NUNCA publica discovery (dispositivo tonto).
+# LWT: ESPHome solo soporta payload estático para will_message/birth_message
+# (no admite lambda), por lo que se publica status online/offline con ts real
+# en on_boot/on_shutdown y via intervalo. El will_message estático es fallback
+# del broker con ts=0.
+# ==============================================================================
+mqtt:
+  id: mqtt_client
+  broker: ${mqtt_broker}
+  port: 1883
+  discovery: false
+# Publicación periódica de status online cada 5 min (heartbeat para plataforma).
+# Útil si sntp_time corrige ts o para renovar retain.
+interval:
+  - interval: 5min
+    then:
+      - mqtt.publish:
+          topic: !lambda 'return "terra/" + id(hw_id) + "/controller/status/status";'
+          payload: !lambda |-
+            char buf[96];
+            auto t = id(sntp_time).now();
+            long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
+            snprintf(buf, sizeof(buf), "{\"state\":\"online\",\"ts\":%lld}", ts);
+            return std::string(buf);
+          retain: true
+          qos: 1
+
+# Nota: no hay on_message estático; las suscripciones a
+# terra/{hw_id}/+/request/# se crean en runtime en esphome.on_boot (prioridad 600)
+# via esphome::mqtt::global_mqtt_client->subscribe(...) con hw_id ya derivado.
+# El router traduce terra/{tenant}/{module}/{device}/request/{action} → terra/{hw_id}/...

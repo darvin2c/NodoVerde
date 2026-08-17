@@ -73,7 +73,7 @@ Toda función tiene exactamente un dueño. Quien no es dueño, tiene prohibido e
 | Herramientas del agente | **MCP** | Skills de ClawHub para dominio agrícola/financiero (solo genéricas) |
 | Dashboard telemetría | **Grafana** | UI propia en v1 |
 | Interfaz operativa | **Chat (WhatsApp/Telegram)** | UI propia en v1 |
-| Contrato de mensajes | **[AsyncAPI](30-specs/asyncapi.yaml)** | Payloads ad-hoc fuera del spec |
+| Contrato de mensajes | **[AsyncAPI](contract/asyncapi.yaml)** (v0.4.0: dos planos — dispositivo `hw_id` + interno `tenant/module`, ver ADR-0015) | Payloads ad-hoc fuera del spec |
 | Ingesta MQTT → DB | **Telegraf** (config declarativa) | Consumidor propio (solo si Telegraf se queda corto) |
 | Interfaz visual | **Home Assistant** (ADR-0008/0009) | UI propia; sus botones publican solicitudes, nunca comandos |
 | Firmware de nodos | **ESPHome** (YAML; modo host en sim) | Firmware propio en C++/MicroPython |
