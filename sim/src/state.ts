@@ -9,7 +9,6 @@ export type PersistedState = {
   speed: number;
   modules: ModuleState[];
   scenario: string;
-  et0Hourly?: number[]; // legacy, ignorado desde weather.ts
 };
 
 function statePath(): string {

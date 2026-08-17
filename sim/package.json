@@ -1,20 +1,25 @@
 {
   "name": "terra-sim",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "terraOS hydroponic simulator",
+  "description": "terraOS hydroponic simulator — física + emuladores de nodo (ADR-0017)",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/supervisor.ts",
+    "physics": "tsx src/physics/engine.ts",
+    "node": "tsx src/node/emulator.ts",
+    "ctl": "tsx src/ctl.ts",
     "test": "vitest run",
     "contract": "tsx scripts/contract-check.ts"
   },
   "dependencies": {
     "mqtt": "^5.10.1",
+    "pg": "^8.13.1",
     "yaml": "^2.6.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
+    "@types/pg": "^8.11.10",
     "ajv": "^8.20.0",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",

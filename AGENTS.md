@@ -8,7 +8,7 @@ terraOS: agente autónomo de gestión agrícola integral (financiero + operacion
 
 1. **Un dueño por función** — consulta la matriz de dueños en `docs/10-architecture.md`. Si tu cambio crea un segundo dueño, para y escribe un ADR.
 2. **Regla de admisión** — nada entra al build sin trigger cumplido del backlog en `ROADMAP.md`.
-3. **Contratos primero** — ningún PR cambia un mensaje MQTT sin actualizar `docs/30-specs/asyncapi.yaml` en el mismo commit.
+3. **Contratos primero** — ningún PR cambia un mensaje MQTT sin actualizar `contract/asyncapi.yaml` en el mismo commit.
 4. **El LLM nunca**: toca actuadores sin policy module, hace aritmética financiera, ni genera la telemetría base del sim.
 5. **Órdenes humanas desde HA** van al canal de solicitudes (`request/`), jamás al de comandos (`cmd/`) — el portero valida a humanos e IA por igual (ADR-0009).
 6. **Tablas del agente** — solo con prefijo `agent_*`; jamás duplicando movimientos financieros.
@@ -20,14 +20,17 @@ terraOS: agente autónomo de gestión agrícola integral (financiero + operacion
 
 ```bash
 cp .env.example .env
-docker compose up -d --wait        # mosquitto, timescale, telegraf, grafana, minio, HA
-cd sim && pnpm install && pnpm dev # simulador en host (Node 22 + pnpm)
-# flags: --speed N --seed S --offline --scenario normal|ec_baja|sensor_muerto --start <iso>
+docker compose up -d --wait              # mosquitto, timescale, telegraf, grafana, minio, HA
+cd router && pnpm install && pnpm dev    # router de identidad (ADR-0015) — traduce plano dispositivo ↔ interno
+cd sim && pnpm install && pnpm dev       # mundo simulado (ADR-0017): física + un emulador por hw_id
+# flags del sim: --speed N --seed S --offline --scenario normal|ec_baja|sensor_muerto --start <iso>
+# laboratorio: pnpm ctl list | add-node --crop X [--hw H] | remove-node --hw H [--unclaim] | scenario <nombre>
 ```
 
 - HA: http://localhost:8124 (el 8123 del host lo ocupa TerraSmart). Primera vez: onboarding + Settings → Add Integration → MQTT → broker `mosquitto:1883` (HA moderno NO acepta broker en YAML).
 - Grafana: http://localhost:3001 (admin/admin), dashboard "Terra Overview" provisionado.
-- Verificación automática: `cd sim && pnpm test` (unit) y `pnpm contract` (mensajes vivos vs AsyncAPI v0.3.0).
+- Laboratorio (monitor del simulador, Node-RED): http://localhost:1880/dashboard/lab — verdad física vs. publicado, enchufar/desenchufar nodos. Editor: http://localhost:1880.
+- Verificación automática: `cd sim && pnpm test` (unit) y `pnpm contract` (mensajes vivos vs AsyncAPI v0.4.0); `cd router && pnpm test`.
 
 ## Stack
 

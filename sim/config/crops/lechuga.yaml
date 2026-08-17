@@ -1,5 +1,5 @@
 # Perfil de cultivo: lechuga hidropónica (NFT / balsa)
-# name: identificador del cultivo (coincide con filename y con fincas/*/crop)
+# name: identificador del cultivo (coincide con filename y con sim/fincas/*/crop)
 # ec_target: rango objetivo de conductividad eléctrica en mS/cm (nutrientes)
 # ph_target: rango objetivo de pH (disponibilidad de nutrientes)
 # water_temp: rango objetivo de temperatura del agua en °C (oxígeno disuelto y sanidad radicular)

@@ -34,3 +34,17 @@ export function measure(
   const noisy = trueValue + drift + gaussian(rng) * spec.sigma;
   return Number((Math.round(noisy / spec.resolution) * spec.resolution).toFixed(4));
 }
+
+// Confianza publicada (ADR-0010, conocimiento honesto): decae con la deriva
+// acumulada del instrumento — un electrodo que lleva 40 días sin calibrar NO
+// merece la misma confianza que uno recién instalado. Heurística de laboratorio:
+// deriva relativa pesa por fracción de lectura, absoluta por nº de resoluciones.
+// Piso 40: el sensor sigue "vivo" aunque degradado; 0 sería sensor muerto.
+export function confidenceFor(metric: string, elapsedDays: number): number {
+  const spec = SENSOR_SPECS[metric];
+  if (!spec || spec.driftPerDay === 0) return 100;
+  const penalty = spec.relative
+    ? spec.driftPerDay * elapsedDays * 300 // 0.3%/día → -13.5 pts a los 15 días
+    : (spec.driftPerDay * elapsedDays * 3) / spec.resolution;
+  return Math.round(Math.max(40, 100 - penalty));
+}

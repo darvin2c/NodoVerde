@@ -1,64 +1,220 @@
 asyncapi: "3.0.0"
 info:
   title: terraOS Bus Contract
-  version: 0.3.0
+  version: 0.4.0
   description: |
-    Contrato del bus MQTT de terraOS. Toda comunicación sim/edge/cerebro pasa por aquí.
-    Namespace: terra/{tenant}/{module}/{device}/{metric}/{kind}
-    - tenant: slug de finca (demo en Fase 0)
-    - module: mod-1..mod-4
-    - device: ec-01, ph-01, temp-01, level-01, flow-01, climate-01,
-              pump-recirc-01, valve-fill-01, doser-a-01, doser-b-01, doser-ph-01, cam-01
-    - metric: ec | ph | temp | level | flow | air_temp | humidity | switch | photo | confidence
-    - kind: reading | event | status | confidence
+    Contrato AUTORITATIVO del bus MQTT de terraOS (ADR-0003, ADR-0015).
+    Toda comunicación sim/edge/router/cerebro pasa por aquí.
+
+    Dos planos distinguibles por número de segmentos:
+
+    PLANO DISPOSITIVO — lo que publica y escucha el fierro (5 segmentos, hw_id de fábrica):
+      terra/{hw_id}/{device}/{metric}/reading
+      terra/{hw_id}/{device}/{metric}/event
+      terra/{hw_id}/{device}/status/status
+      terra/{hw_id}/{device}/confidence/confidence
+      terra/{hw_id}/{device}/request/{action}        (el fierro ESCUCHA; action ∈ set|read|capture|calibrate)
+
+      - hw_id: 12 hex minúsculas (MAC de fábrica sin dos puntos). Demo: 020000000001..020000000004.
+      - device: ec-01, ph-01, temp-01, level-01, flow-01, climate-01,
+                pump-recirc-01, valve-fill-01, doser-a-01, doser-b-01, doser-ph-01, cam-01
+      - metric: ec | ph | temp | level | flow | air_temp | humidity | switch | photo | confidence
+      - El hardware JAMÁS conoce tenant/module/cultivo; solo su hw_id.
+
+    PLANO INTERNO — resuelto por el router; consumen HA/Telegraf/cerebro/Grafana (6 segmentos):
+      terra/{tenant}/{module}/{device}/{metric}/reading
+      terra/{tenant}/{module}/{device}/{metric}/event
+      terra/{tenant}/{module}/{device}/status/status
+      terra/{tenant}/{module}/{device}/confidence/confidence
+      terra/{tenant}/{module}/{device}/request/{action}
+      terra/{tenant}/{module}/{device}/cmd
+      homeassistant/{component}/{unique_id}/config
+
+      - tenant: slug de finca (demo en Fase 0)
+      - module: mod-1..mod-4 (escalable a árbol parent_id en DB, ADR-0016)
+      - device/metric: idénticos al plano dispositivo
+
+    Router de identidad (router/):
+      - device→interno: subscribe plano dispositivo; resuelve hw_id→(tenant,module) en
+        device_identities (cache con refresh); republica en plano interno con payload idéntico.
+        hw_id desconocido → log + descartar.
+      - interno→device: subscribe terra/+/+/+/request/#; resuelve (tenant,module)→hw_id;
+        republica como terra/{hw_id}/{device}/request/{action}, payload intacto, qos1.
+      - HA discovery: lo publica el router (nunca el dispositivo) al resolver un hw_id
+        conocido por primera vez; state_topics con 6 segmentos.
 
     Reglas:
     - Solo lecturas instantáneas viajan por el bus. Historia y agregaciones: TimescaleDB.
-    - Actuadores reciben SOLO por cmd (con policy_id, desde el portero).
+    - Retain: status (ambos planos) y readings de switches retenidos; resto no. HA discovery retenido.
+    - LWT: cada dispositivo registra offline en terra/{hw_id}/{device}/status/status; el router
+      lo traduce al plano interno.
+    - QoS: sensores qos según kind (el sim hoy usa qos0 para lecturas — se mantiene por kind);
+      request/cmd qos1; status qos1 retained.
+    - Timestamps: epoch milisegundos (entero, campo ts).
+    - Home Assistant discovery: homeassistant/{component}/{unique_id}/config (retenido),
+      publicado por el router; state_topic apunta al plano interno (6 segmentos).
+    - Actuadores en plano interno reciben SOLO por cmd (con policy_id, desde el portero) y
+      por request/{action} (solicitudes humanas validadas por el portero).
       EXCEPCIÓN dev Fase 0: HA publica a request/set (payload ON/OFF) y el sim actúa de portero.
-    - Discovery de Home Assistant: homeassistant/{component}/{device_id}/config (retenido).
-    - Availability: cada dispositivo publica status online/offline retenido; offline también por LWT.
-    - Timestamps: epoch milisegundos (entero).
+
+    Historial:
+    - v0.4.0 (2026-08-16, ADR-0015): plano dispositivo por hw_id (5 seg), identidad dinámica
+      vía DB (device_identities) + router. HA discovery pasa a publicarlo la plataforma.
+      Plano interno (6 seg) idéntico al contrato v0.3.0. Spec desactualizado previo
+      (namespace terraos/{tenant}/{parcela}/... ) eliminado por no estar implementado.
+    - v0.3.0: +canal confidence por módulo (ADR-0010), eventos task_created/task_done.
+    - v0.2.0: +device/status (retained + LWT), +solicitudes humanas (ADR-0009).
+
 servers:
   mosquitto:
     host: localhost:1883
     protocol: mqtt
+    description: Broker único (Mosquitto). En producción en VPS; edge con bridge local (ADR-0006). Env MQTT_URL.
+
 channels:
-  reading:
-    address: terra/{tenant}/{module}/{device}/{metric}/reading
+  # ── Plano dispositivo (5 segmentos — el fierro) ──
+  deviceReading:
+    address: terra/{hw_id}/{device}/{metric}/reading
+    description: Lectura del fierro (plano dispositivo, 5 seg). El router la traduce a terra/{tenant}/{module}/... si hw_id conocido.
+    parameters:
+      hw_id: { description: "ID de fábrica: 12 hex minúsculas (MAC sin dos puntos)" }
+      device: { description: "ID del dispositivo" }
+      metric: { description: "Métrica reportada" }
     messages:
       reading:
         payload: { $ref: "#/components/schemas/Reading" }
-  event:
-    address: terra/{tenant}/{module}/{device}/{metric}/event
+
+  deviceEvent:
+    address: terra/{hw_id}/{device}/{metric}/event
+    description: Evento del fierro (plano dispositivo, 5 seg).
+    parameters:
+      hw_id: { description: "ID de fábrica" }
+      device: { description: "ID del dispositivo" }
+      metric: { description: "Métrica" }
     messages:
       event:
         payload: { $ref: "#/components/schemas/Event" }
-  status:
-    address: terra/{tenant}/{module}/{device}/status/status
+
+  deviceStatus:
+    address: terra/{hw_id}/{device}/status/status
+    description: |
+      Estado de vida del dispositivo (plano dispositivo, 5 seg). RETAINED + LWT (offline).
+      El router lo republica en el plano interno.
+    parameters:
+      hw_id: { description: "ID de fábrica" }
+      device: { description: "ID del dispositivo" }
     messages:
       status:
         payload: { $ref: "#/components/schemas/Status" }
-  confidence:
-    address: terra/{tenant}/{module}/{device}/confidence/confidence
+
+  deviceConfidence:
+    address: terra/{hw_id}/{device}/confidence/confidence
+    description: Confianza del dispositivo (plano dispositivo, 5 seg).
+    parameters:
+      hw_id: { description: "ID de fábrica" }
+      device: { description: "ID del dispositivo" }
     messages:
       confidence:
         payload: { $ref: "#/components/schemas/Confidence" }
-  cmd:
-    address: terra/{tenant}/{module}/{device}/cmd
-    messages:
-      cmd:
-        payload: { $ref: "#/components/schemas/Cmd" }
-  request:
-    address: terra/{tenant}/{module}/{device}/request/{action}
+
+  deviceRequest:
+    address: terra/{hw_id}/{device}/request/{action}
+    description: |
+      El fierro ESCUCHA solicitudes aquí (plano dispositivo, 5 seg). El router traduce
+      desde terra/{tenant}/{module}/{device}/request/{action}. action ∈ set|read|capture|calibrate.
+    parameters:
+      hw_id: { description: "ID de fábrica" }
+      device: { description: "ID del dispositivo" }
+      action: { description: "Acción solicitada", enum: [set, read, capture, calibrate] }
     messages:
       request:
         payload: { $ref: "#/components/schemas/Request" }
+
+  # ── Plano interno (6 segmentos — plataforma) ──
+  reading:
+    address: terra/{tenant}/{module}/{device}/{metric}/reading
+    description: Lectura en plano interno (6 seg). Publicada por el router tras resolver hw_id.
+    parameters:
+      tenant: { description: "Slug de finca (demo en Fase 0)" }
+      module: { description: "ID de módulo" }
+      device: { description: "ID del dispositivo" }
+      metric: { description: "Métrica reportada" }
+    messages:
+      reading:
+        payload: { $ref: "#/components/schemas/Reading" }
+
+  event:
+    address: terra/{tenant}/{module}/{device}/{metric}/event
+    description: Evento en plano interno (6 seg).
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+      device: { description: "ID del dispositivo" }
+      metric: { description: "Métrica" }
+    messages:
+      event:
+        payload: { $ref: "#/components/schemas/Event" }
+
+  status:
+    address: terra/{tenant}/{module}/{device}/status/status
+    description: |
+      Estado de vida en plano interno (6 seg). RETAINED + LWT (traducido del plano dispositivo).
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+      device: { description: "ID del dispositivo" }
+    messages:
+      status:
+        payload: { $ref: "#/components/schemas/Status" }
+
+  confidence:
+    address: terra/{tenant}/{module}/{device}/confidence/confidence
+    description: Confianza en plano interno (6 seg).
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+      device: { description: "ID del dispositivo" }
+    messages:
+      confidence:
+        payload: { $ref: "#/components/schemas/Confidence" }
+
+  cmd:
+    address: terra/{tenant}/{module}/{device}/cmd
+    description: Comando a actuador en plano interno (6 seg). Solo el policy module publica aquí.
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+      device: { description: "ID del actuador" }
+    messages:
+      cmd:
+        payload: { $ref: "#/components/schemas/Cmd" }
+
+  request:
+    address: terra/{tenant}/{module}/{device}/request/{action}
+    description: |
+      Solicitud humana o del cerebro en plano interno (6 seg). El router la traduce
+      a terra/{hw_id}/{device}/request/{action} si (tenant,module) tiene hw_id asignado.
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+      device: { description: "ID del dispositivo" }
+      action: { description: "Acción solicitada", enum: [set, read, capture, calibrate, start, stop] }
+    messages:
+      request:
+        payload: { $ref: "#/components/schemas/Request" }
+
   haDiscovery:
     address: homeassistant/{component}/{device_id}/config
+    description: |
+      Discovery de Home Assistant (retenido). LO PUBLICA EL ROUTER, nunca el dispositivo.
+      unique_id y state_topic usan el plano interno (6 segmentos).
+    parameters:
+      component: { description: "Componente HA: sensor, switch, etc." }
+      device_id: { description: "unique_id del dispositivo" }
     messages:
       haDiscovery:
         payload: { $ref: "#/components/schemas/HaDiscovery" }
+
 components:
   schemas:
     Reading:
@@ -73,21 +229,21 @@ components:
       required: [name, ts]
       properties:
         name: { type: string }
-        ts: { type: integer }
+        ts: { type: integer, description: epoch ms }
         detail: { type: object, additionalProperties: true }
     Status:
       type: object
       required: [state, ts]
       properties:
         state: { type: string, enum: [online, offline, error] }
-        ts: { type: integer }
+        ts: { type: integer, description: epoch ms }
         meta: { type: object, additionalProperties: true }
     Confidence:
       type: object
       required: [v, ts]
       properties:
         v: { type: number, minimum: 0, maximum: 100 }
-        ts: { type: integer }
+        ts: { type: integer, description: epoch ms }
         sources:
           type: object
           additionalProperties: { type: number }
@@ -100,11 +256,13 @@ components:
         policy_id: { type: string }
         params: { type: object, additionalProperties: true }
     Request:
-      type: object
       description: |
         Solicitud humana (ADR-0009). Actuador: action=start|stop|set. Sensor: read|calibrate.
-        Camara: capture. En dev Fase 0, HA switch publica payload crudo ON/OFF a request/set.
-      additionalProperties: true
+        Cámara: capture. En dev Fase 0, HA switch publica payload crudo ON/OFF a request/set.
+      oneOf:
+        - type: string # crudo Fase 0: "ON" | "OFF"
+        - type: object # forma futura: {"v": ...} | {"action": ...}
+          additionalProperties: true
     HaDiscovery:
       type: object
       description: Config de discovery de Home Assistant (sensor/switch/camera)
@@ -112,7 +270,7 @@ components:
 
   deviceMetrics:
     description: |
-      Mapa dispositivo -> metricas que publica:
+      Mapa dispositivo -> métricas que publica:
       ec-01: [ec]                      (mS/cm)
       ph-01: [ph]
       temp-01: [temp]                  (°C agua)

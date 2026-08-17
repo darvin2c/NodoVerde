@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { syntheticWeather, weatherAt } from "../src/weather.js";
-import { measure, SENSOR_SPECS } from "../src/sensors.js";
+import { measure, confidenceFor, SENSOR_SPECS } from "../src/sensors.js";
 import { mulberry32, createInitialModule, stepModule, triggerDoserA, DEFAULT_PARAMS } from "../src/model.js";
 
 describe("weather: replay de serie", () => {
@@ -67,6 +67,31 @@ describe("sensores: capa de medición", () => {
 
   it("métrica desconocida pasa el valor intacto", () => {
     expect(measure("switch", 1, 0, mulberry32(1))).toBe(1);
+  });
+});
+
+describe("sensores: confianza honesta (ADR-0010)", () => {
+  it("sensor sin deriva reporta 100 siempre", () => {
+    expect(confidenceFor("temp", 0)).toBe(100);
+    expect(confidenceFor("temp", 45)).toBe(100);
+    expect(confidenceFor("desconocida", 10)).toBe(100);
+  });
+
+  it("electrodo EC pierde confianza con la deriva acumulada", () => {
+    const d0 = confidenceFor("ec", 0);
+    const d15 = confidenceFor("ec", 15);
+    const d45 = confidenceFor("ec", 45);
+    expect(d0).toBe(100);
+    expect(d15).toBeLessThan(100);
+    expect(d45).toBeLessThan(d15);
+  });
+
+  it("nunca baja del piso 40 (degradado ≠ muerto)", () => {
+    expect(confidenceFor("ph", 10_000)).toBe(40);
+  });
+
+  it("determinística: mismo día, misma confianza", () => {
+    expect(confidenceFor("ph", 20)).toBe(confidenceFor("ph", 20));
   });
 });
 

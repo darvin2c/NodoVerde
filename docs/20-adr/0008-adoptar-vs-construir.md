@@ -24,6 +24,7 @@ Riesgo de reinventar piezas que el ecosistema open-source ya resolvió (UI, firm
 | Telegraf | Ingestor MQTT → TimescaleDB (config declarativa) | Fase 0 |
 | OpenClaw | Cerebro | Fase 1 |
 | Mosquitto / TimescaleDB / MinIO / Grafana | Bus / historial / media / análisis | Fase 0 |
+| Node-RED + FlowFuse Dashboard 2.0 | **Monitor del simulador** (banco de laboratorio: verdad física vs. publicado, LWT, enchufar/desenchufar). Plano laboratorio — jamás en el camino del producto | Fase 0 |
 
 **Construir (el diferencial, nadie lo tiene):**
 

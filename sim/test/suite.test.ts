@@ -11,8 +11,11 @@ import {
   buildStatus,
   buildEvent,
   buildConfidence,
-  haSensorDiscovery,
-  haSwitchDiscovery,
+  readingTopic,
+  eventTopic,
+  statusTopic,
+  confidenceTopic,
+  requestTopic,
   ReadingSchema,
   StatusSchema,
   EventSchema,
@@ -95,7 +98,6 @@ describe("persistencia roundtrip", () => {
         speed: 5,
         modules: [createInitialModule("mod-1", "lechuga", [1.2, 1.8])],
         scenario: "normal",
-        et0Hourly: fixedEt0Curve(),
       };
       saveState(state, p);
       const loaded = loadState(p);
@@ -103,7 +105,6 @@ describe("persistencia roundtrip", () => {
       expect(loaded!.simMs).toBe(state.simMs);
       expect(loaded!.seed).toBe(state.seed);
       expect(loaded!.modules[0].ec).toBe(state.modules[0].ec);
-      expect(loaded!.et0Hourly).toEqual(state.et0Hourly);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -132,29 +133,45 @@ describe("payload builders cumplen schema zod del contrato", () => {
     expect(() => ConfidenceSchema.parse(c)).not.toThrow();
     expect(c.v).toBe(100);
   });
-  it("HA discovery sensor", () => {
-    const { topic, payload } = haSensorDiscovery({
-      tenant: "demo",
-      mod: "mod-1",
-      device: "ec-01",
-      metric: "ec",
-      name: "mod-1 EC",
-      unit: "mS/cm",
-    });
-    expect(topic).toBe("homeassistant/sensor/mod-1-ec-01-ec/config");
-    expect(payload.unique_id).toBe("mod-1-ec-01-ec");
-    expect(payload.state_topic).toBe("terra/demo/mod-1/ec-01/ec/reading");
-    expect(payload.availability_topic).toBe("terra/demo/mod-1/ec-01/status/status");
-    const p = payload as Record<string, unknown>;
-    expect(p.value_template).toBe("{{ value_json.v }}");
-    expect(p.unit_of_measurement).toBe("mS/cm");
-    expect(p.state_class).toBe("measurement");
-    // switch discovery
-    const sw = haSwitchDiscovery({ tenant: "demo", mod: "mod-1", device: "pump-recirc-01", name: "pump" });
-    expect(sw.topic).toBe("homeassistant/switch/mod-1-pump-recirc-01-switch/config");
-    const sp = sw.payload as Record<string, unknown>;
-    expect(sp.command_topic).toBe("terra/demo/mod-1/pump-recirc-01/request/set");
-    expect(sp.payload_on).toBe("ON");
-    expect(sp.payload_off).toBe("OFF");
+});
+
+describe("topics plano dispositivo (5 segmentos, hw_id)", () => {
+  const hwId = "020000000001";
+  it("readingTopic es 5 segmentos por hw_id", () => {
+    const t = readingTopic(hwId, "ec-01", "ec");
+    expect(t).toBe(`terra/${hwId}/ec-01/ec/reading`);
+    expect(t.split("/")).toHaveLength(5);
+  });
+  it("eventTopic es 5 segmentos", () => {
+    const t = eventTopic(hwId, "doser-a-01", "ec");
+    expect(t).toBe(`terra/${hwId}/doser-a-01/ec/event`);
+    expect(t.split("/")).toHaveLength(5);
+  });
+  it("statusTopic es 5 segmentos terra/hw_id/device/status/status", () => {
+    const t = statusTopic(hwId, "ec-01");
+    expect(t).toBe(`terra/${hwId}/ec-01/status/status`);
+    expect(t.split("/")).toHaveLength(5);
+  });
+  it("confidenceTopic es 5 segmentos", () => {
+    const t = confidenceTopic(hwId, "ec-01");
+    expect(t).toBe(`terra/${hwId}/ec-01/confidence/confidence`);
+    expect(t.split("/")).toHaveLength(5);
+  });
+  it("requestTopic es 5 segmentos terra/hw_id/device/request/action", () => {
+    const t = requestTopic(hwId, "pump-recirc-01", "set");
+    expect(t).toBe(`terra/${hwId}/pump-recirc-01/request/set`);
+    expect(t.split("/")).toHaveLength(5);
+    expect(t.split("/")[3]).toBe("request");
+  });
+  it("ningún topic contiene tenant o módulo lógico", () => {
+    const topics = [
+      readingTopic(hwId, "ec-01", "ec"),
+      statusTopic(hwId, "ec-01"),
+      requestTopic(hwId, "ec-01", "read"),
+    ];
+    for (const t of topics) {
+      expect(t).not.toContain("demo");
+      expect(t).not.toContain("mod-1");
+    }
   });
 });

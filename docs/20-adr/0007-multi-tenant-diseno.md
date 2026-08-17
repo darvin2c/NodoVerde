@@ -22,9 +22,9 @@ terraOS apunta a varias fincas eventualmente. Retroceder un esquema mono-finca a
 ## Decisión
 
 **Diseño multi-tenant, operación mono-finca.** Concretamente:
-
 - Todas las tablas de dominio llevan `tenant_id`.
 - Los topics MQTT incluyen el tenant: `terraos/{tenant}/{parcela}/...` (ver AsyncAPI).
+  > **Enmienda ADR-0015 (2026-08-16):** el plano dispositivo usa `hw_id` (`terra/{hw_id}/...`) y NO lleva tenant. El tenant vive en el plano interno `terra/{tenant}/{module}/...` y en la DB (`device_identities` + tablas de dominio). Ver `contract/asyncapi.yaml` v0.4.0 y ADR-0015.
 - Se despliega y prueba con una sola finca.
 - Auth, aislamiento entre tenants y administración de organizaciones: **diferidos** (trigger: segunda finca real).
 

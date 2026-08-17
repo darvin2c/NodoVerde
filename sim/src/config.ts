@@ -5,7 +5,7 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 const FincaSchema = z.object({
-  tenant: z.string(),
+  tenant: z.string().optional(),
   location: z.object({
     lat: z.number(),
     lon: z.number(),
@@ -14,7 +14,7 @@ const FincaSchema = z.object({
   tank_liters: z.number().positive(),
   modules: z.array(
     z.object({
-      id: z.string(),
+      hw_id: z.string().regex(/^[0-9a-f]{12}$/),
       crop: z.string(),
     }),
   ),
@@ -51,13 +51,13 @@ export function loadFinca(yamlPath?: string): FincaConfig {
   if (!p) {
     p =
       findFile([
-        "fincas/demo.yaml",
-        "../fincas/demo.yaml",
-        "../../fincas/demo.yaml",
+        "sim/fincas/demo.yaml", // cwd = repo root
+        "fincas/demo.yaml", // cwd = sim/
+        "../fincas/demo.yaml", // relativo a src/
       ]) ?? undefined;
   }
   if (!p || !existsSync(p)) {
-    throw new Error(`finca yaml not found: ${p ?? "fincas/demo.yaml"}`);
+    throw new Error(`finca yaml not found: ${p ?? "sim/fincas/demo.yaml"}`);
   }
   const raw = readFileSync(p, "utf-8");
   const parsed = parseYaml(raw);
@@ -68,9 +68,9 @@ export function loadCrop(crop: string, baseDir?: string): CropConfig {
   const candidates = baseDir
     ? [resolve(baseDir, `${crop}.yaml`)]
     : [
-        `config/crops/${crop}.yaml`,
-        `../config/crops/${crop}.yaml`,
-        `../../config/crops/${crop}.yaml`,
+        `sim/config/crops/${crop}.yaml`, // cwd = repo root
+        `config/crops/${crop}.yaml`, // cwd = sim/
+        `../config/crops/${crop}.yaml`, // relativo a src/
       ];
   const p = findFile(candidates);
   if (!p || !existsSync(p)) {
