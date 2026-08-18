@@ -9,7 +9,7 @@ import mqtt from "mqtt";
 import pg from "pg";
 import { createServer } from "node:http";
 import { z } from "zod";
-import { shouldForward, formatHookMessage, DEFAULT_THROTTLE_MS } from "./forward.js";
+import { shouldForward, formatHookMessage, DEFAULT_THROTTLE_MS, formatPolicyEvent, shouldForwardPolicyEvent, parsePolicyEventBody } from "./forward.js";
 import { targetAgents, extractExpertReport } from "./route.js";
 import type { Alert } from "./forward.js";
 
@@ -311,15 +311,23 @@ async function handleMessage(topic: string, payload: Buffer): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP listener — receptor de reportes de expertos (ADR-0019)
-// Las automations de los expertos entregan su resultado por --webhook aquí;
-// el bridge lo reenvía al hook del ORQUESTADOR (única voz al humano).
-// Auth: mismo OPENCLAW_HOOK_TOKEN como query param (solo red interna terra).
+// HTTP listener — receptor de reportes de expertos (ADR-0019) y eventos del
+// portero (Fase 3). Ambos reenvían al hook del ORQUESTADOR (única voz al humano —
+// ADR-0019, agentId main). Auth: mismo OPENCLAW_HOOK_TOKEN como query param
+// (solo red interna terra).
+//
+// POST /expert-report?token=...  → reenvío con 502 si hook falla (humano/experto).
+// POST /policy-event?token=...   → body {kind,tenant,module,message}
+//   Validación: kind desconocido o message vacío → 400 {error}; token malo → 401.
+//   Reenvío fire-and-forget: SIEMPRE 202 {forwarded:true|false} aunque el hook
+//   falle tras retry (el portero no debe bloquearse; log + forwarded:false).
 // ---------------------------------------------------------------------------
 
 const httpServer = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
-  if (req.method !== "POST" || url.pathname !== "/expert-report") {
+  const isExpert = url.pathname === "/expert-report";
+  const isPolicy = url.pathname === "/policy-event";
+  if (req.method !== "POST" || (!isExpert && !isPolicy)) {
     res.writeHead(404).end("not found");
     return;
   }
@@ -339,6 +347,43 @@ const httpServer = createServer((req, res) => {
   });
   req.on("end", () => {
     void (async () => {
+      if (isPolicy) {
+        let body: unknown;
+        const raw = Buffer.concat(chunks).toString("utf-8");
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" }).end(
+            JSON.stringify({ error: "JSON inválido" }),
+          );
+          return;
+        }
+        const parsed = parsePolicyEventBody(body);
+        if (!parsed.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" }).end(
+            JSON.stringify({ error: parsed.error }),
+          );
+          return;
+        }
+        const event = parsed.event;
+        if (!shouldForwardPolicyEvent(event)) {
+          res.writeHead(202, { "Content-Type": "application/json" }).end(
+            JSON.stringify({ forwarded: false }),
+          );
+          return;
+        }
+        const hookMessage = formatPolicyEvent(event);
+        console.log(`[bridge] policy-event ${event.kind} ${event.tenant}/${event.module} → hook`);
+        const ok = await postToHook(hookMessage, "main");
+        if (!ok) {
+          console.error("[bridge] policy-event hook falló tras retry — aceptado igual (forwarded:false)");
+        }
+        res.writeHead(202, { "Content-Type": "application/json" }).end(
+          JSON.stringify({ forwarded: ok }),
+        );
+        return;
+      }
+      // --- /expert-report (comportamiento existente) ---
       let payload: unknown = Buffer.concat(chunks).toString("utf-8");
       try {
         payload = JSON.parse(payload as string);
@@ -360,7 +405,7 @@ const httpServer = createServer((req, res) => {
 });
 
 httpServer.listen(BRIDGE_HTTP_PORT, () => {
-  console.log(`[bridge] HTTP /expert-report escuchando en :${BRIDGE_HTTP_PORT}`);
+  console.log(`[bridge] HTTP escuchando en :${BRIDGE_HTTP_PORT} (/expert-report, /policy-event)`);
 });
 
 // ---------------------------------------------------------------------------

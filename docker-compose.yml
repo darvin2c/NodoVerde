@@ -276,6 +276,33 @@ services:
       retries: 5
       start_period: 10s
 
+  # Portero (Fase 3, ADR-0012): gate de actuación — MCP terra-policy :7762 + HTTP /healthz + consumer MQTT
+  policy:
+    build: ./services/policy
+    container_name: terra-policy
+    restart: unless-stopped
+    networks: [terra]
+    ports:
+      - "7762:7762"
+    environment:
+      MQTT_URL: mqtt://mosquitto:1883
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      POLICY_PORT: "7762"
+      BRIDGE_URL: http://bridge:7765
+      OPENCLAW_HOOK_TOKEN: ${OPENCLAW_HOOK_TOKEN:-}
+      POLICY_ADMIN_TOKEN: ${POLICY_ADMIN_TOKEN:-dev-admin-token}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescale:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:7762/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # Bridge MQTT→OpenClaw hooks (bus → cerebro). Observador: jamás publica cmd/request.
   bridge:
     build: ./services/bridge
@@ -307,6 +334,8 @@ services:
       PWA_SERVER_PORT: "7780"
       DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
       MQTT_URL: mqtt://mosquitto:1883
+      POLICY_URL: http://policy:7762
+      POLICY_ADMIN_TOKEN: ${POLICY_ADMIN_TOKEN:-dev-admin-token}
     depends_on:
       mosquitto:
         condition: service_healthy

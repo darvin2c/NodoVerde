@@ -5,8 +5,9 @@
 
 import mqtt from "mqtt";
 import pg from "pg";
-import { parseReadingTopic, parseStatusTopic, buildHealthTopic, buildAlertTopic } from "./topics.js";
+import { parseReadingTopic, parseStatusTopic, parseCmdTopic, buildHealthTopic, buildAlertTopic } from "./topics.js";
 import { DeviceHealthTracker, type ExpectedDevice } from "./health.js";
+import { CrossVerifier } from "./verify.js";
 
 const { Pool } = pg;
 
@@ -19,11 +20,13 @@ const FROZEN_READINGS = process.env.FROZEN_READINGS ? parseInt(process.env.FROZE
 // Sin esto, cada reinicio del watchdog dispara una tormenta de falsos device_offline/silence.
 const BOOT_GRACE_MS = process.env.BOOT_GRACE_MS ? parseInt(process.env.BOOT_GRACE_MS, 10) : 30000;
 const bootedAt = Date.now();
+const VERIFY_WINDOW_MS = process.env.VERIFY_WINDOW_MS ? parseInt(process.env.VERIFY_WINDOW_MS, 10) : 900000;
 
 const READING_SUB = "terra/+/+/+/+/reading";
 const STATUS_SUB = "terra/+/+/+/status/status";
+const CMD_SUB = "terra/+/+/+/cmd";
 
-console.log(`[watchdog] arranque MQTT_URL=${MQTT_URL} SILENCE_AFTER_MS=${SILENCE_AFTER_MS} FROZEN_READINGS=${FROZEN_READINGS}`);
+console.log(`[watchdog] arranque MQTT_URL=${MQTT_URL} SILENCE_AFTER_MS=${SILENCE_AFTER_MS} FROZEN_READINGS=${FROZEN_READINGS} VERIFY_WINDOW_MS=${VERIFY_WINDOW_MS}`);
 
 // ---------------------------------------------------------------------------
 // DB pool
@@ -78,6 +81,7 @@ function getTracker(tenant: string, mod: string): DeviceHealthTracker {
   return t;
 }
 
+const verifier = new CrossVerifier({ windowMs: VERIFY_WINDOW_MS });
 // ---------------------------------------------------------------------------
 // MQTT
 // ---------------------------------------------------------------------------
@@ -99,6 +103,10 @@ client.on("connect", () => {
   client.subscribe(STATUS_SUB, { qos: 1 }, (err) => {
     if (err) console.error(`[watchdog] error subscribing ${STATUS_SUB}`, err);
     else console.log(`[watchdog] suscrito ${STATUS_SUB}`);
+  });
+  client.subscribe(CMD_SUB, { qos: 1 }, (err) => {
+    if (err) console.error(`[watchdog] error subscribing ${CMD_SUB}`, err);
+    else console.log(`[watchdog] suscrito ${CMD_SUB}`);
   });
 });
 
@@ -159,25 +167,36 @@ async function evaluateAndPublish(nowMs: number): Promise<void> {
       }
     }
   }
+  // Verificación cruzada comando→efecto (Fase 3)
+  const verifAlerts = verifier.tick(nowMs);
+  for (const a of verifAlerts) {
+    const topic = buildAlertTopic(a.tenant, a.module);
+    try {
+      await publish(topic, JSON.stringify(a), { qos: 1, retain: false });
+      console.log(`[watchdog] alert ${a.tenant}/${a.module} verification_failed ${a.device} kind=${a.detail.kind}`);
+    } catch (err) {
+      console.error(`[watchdog] error publicando alert ${topic}`, err);
+    }
+  }
 }
-
-// ---------------------------------------------------------------------------
-// Handlers de mensajes
-// ---------------------------------------------------------------------------
-
 client.on("message", (topic: string, payload: Buffer) => {
-  // Intentar parsear JSON defensivo
+  // Intentar parsear JSON defensivo (para reading/status); cmd lo maneja tolerante vía verify
   let data: unknown;
+  let jsonOk = true;
   try {
     data = JSON.parse(payload.toString());
   } catch {
-    console.warn(`[watchdog] JSON inválido en ${topic}, descartado`);
-    return;
+    jsonOk = false;
+    data = null;
   }
 
   // Reading
   const reading = parseReadingTopic(topic);
   if (reading) {
+    if (!jsonOk) {
+      console.warn(`[watchdog] JSON inválido en ${topic}, descartado`);
+      return;
+    }
     // Payload esperado: {v, ts}
     const obj = data as Record<string, unknown>;
     const v = obj?.v;
@@ -193,11 +212,23 @@ client.on("message", (topic: string, payload: Buffer) => {
     } catch (err) {
       console.warn(`[watchdog] error seenReading ${topic}`, err);
     }
+    // Verificación cruzada: alimentar última lectura
+    if (typeof v === "number" && Number.isFinite(v)) {
+      try {
+        verifier.onReading(reading.tenant, reading.module, reading.metric, v, Date.now());
+      } catch (err) {
+        console.warn(`[watchdog] error verifier onReading ${topic}`, err);
+      }
+    }
     return;
   }
 
   const status = parseStatusTopic(topic);
   if (status) {
+    if (!jsonOk) {
+      console.warn(`[watchdog] JSON inválido en ${topic}, descartado`);
+      return;
+    }
     const obj = data as Record<string, unknown>;
     const state = typeof obj?.state === "string" ? obj.state : undefined;
     const ts = typeof obj?.ts === "number" ? obj.ts : Date.now();
@@ -210,6 +241,19 @@ client.on("message", (topic: string, payload: Buffer) => {
       tracker.seenStatus(status.tenant, status.module, status.device, state, ts, Date.now());
     } catch (err) {
       console.warn(`[watchdog] error seenStatus ${topic}`, err);
+    }
+    return;
+  }
+
+  // Cmd (Fase 3) — verificación cruzada
+  const cmd = parseCmdTopic(topic);
+  if (cmd) {
+    // payload puede ser Buffer/string/objeto; verifier es tolerante
+    const raw = jsonOk ? data : payload.toString();
+    try {
+      verifier.onCmd(cmd.tenant, cmd.module, cmd.device, raw as unknown, Date.now());
+    } catch (err) {
+      console.warn(`[watchdog] error verifier onCmd ${topic}`, err);
     }
     return;
   }

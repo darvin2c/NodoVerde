@@ -64,6 +64,24 @@ export function parseInternalTopic(
   return null;
 }
 
+export type CmdParsed = {
+  tenant: string;
+  module: string;
+  device: string;
+};
+
+/**
+ * Parsea topic interno de cmd: terra/{tenant}/{module}/{device}/cmd (5 segmentos)
+ */
+export function parseCmdTopic(topic: string): CmdParsed | null {
+  const parts = topic.split("/");
+  if (parts.length !== 5) return null;
+  if (parts[0] !== "terra" || parts[4] !== "cmd") return null;
+  const [_, tenant, mod, device] = parts;
+  if (!tenant || !mod || !device) return null;
+  return { tenant, module: mod, device };
+}
+
 // ---------------------------------------------------------------------------
 // Builders — plano plataforma (4 segmentos)
 // ---------------------------------------------------------------------------

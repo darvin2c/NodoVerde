@@ -156,3 +156,84 @@ export function formatHookMessage(alert: Alert): string {
   }
   return `[ALERTA ${label}] ${location}: ${nameEs}`;
 }
+
+// ---------------------------------------------------------------------------
+// Eventos del portero (Fase 3) — políticas / acciones / órdenes
+// ---------------------------------------------------------------------------
+
+export type PolicyEventKind =
+  | "proposal_pending"
+  | "action_executed"
+  | "work_order_created"
+  | "needs_data";
+
+export type PolicyEvent = {
+  kind: PolicyEventKind;
+  tenant: string;
+  module: string;
+  message: string;
+};
+
+const POLICY_KIND_PREFIX: Record<PolicyEventKind, string> = {
+  proposal_pending: "🔐 Aprobación pendiente",
+  action_executed: "✅ Acción ejecutada",
+  work_order_created: "📋 Orden de trabajo",
+  needs_data: "📉 Confianza insuficiente",
+};
+
+export const VALID_POLICY_KINDS: readonly PolicyEventKind[] = [
+  "proposal_pending",
+  "action_executed",
+  "work_order_created",
+  "needs_data",
+] as const;
+
+/** Mensaje en español para el orquestador (hook OpenClaw, agentId main). */
+export function formatPolicyEvent(event: PolicyEvent): string {
+  const prefix = POLICY_KIND_PREFIX[event.kind] ?? event.kind;
+  const location = `${event.tenant}/${event.module}`;
+  return `${prefix} [${location}] ${event.message}`;
+}
+
+/**
+ * Eventos del portero son raros y load-bearing — siempre se reenvían.
+ * Sin throttle ni filtrado (contrario a las alertas de sensores).
+ */
+export function shouldForwardPolicyEvent(_event: PolicyEvent): boolean {
+  return true;
+}
+
+/**
+ * Valida el body JSON de POST /policy-event.
+ * Mensajes alineados con la respuesta HTTP 400 {error} del bridge.
+ */
+export function parsePolicyEventBody(
+  body: unknown,
+): { ok: true; event: PolicyEvent } | { ok: false; error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "body inválido" };
+  }
+  const obj = body as Record<string, unknown>;
+  const kind = obj.kind;
+  const tenant = obj.tenant;
+  const mod = obj.module;
+  const message = obj.message;
+  if (typeof kind !== "string" || !(kind in POLICY_KIND_PREFIX)) {
+    return { ok: false, error: "kind desconocido" };
+  }
+  if (typeof tenant !== "string" || !tenant.trim() || typeof mod !== "string" || !mod.trim()) {
+    return { ok: false, error: "tenant y module requeridos" };
+  }
+  if (typeof message !== "string" || !message.trim()) {
+    return { ok: false, error: "message vacío" };
+  }
+  return {
+    ok: true,
+    event: {
+      kind: kind as PolicyEventKind,
+      tenant: tenant.trim(),
+      module: mod.trim(),
+      message: message.trim(),
+    },
+  };
+}

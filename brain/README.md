@@ -1,7 +1,7 @@
-# Cerebro — OpenClaw 24/7 (observador puro, Fase 1)
+# Cerebro — OpenClaw 24/7 (Fase 3: lazo cerrado con portero)
 
 > ADR-0001 (framework) · ADR-0012 (portero) · ADR-0018 (instalación oficial) · ADR-0019 (multi-agente).
-> Cero actuación: nadie publica a `cmd` ni a `request/`.
+> Fase 3: el portero (`terra-policy` :7762) valida y publica `cmd` con `policy_id`; expertos proponen, humano aprueba.
 
 ## Arquitectura multi-agente (ADR-0019)
 
@@ -31,11 +31,11 @@ Chat (Telegram / WhatsApp / WebChat — el que elijas; una sola voz al humano)
 | **Automations** | Scheduler nativo: `revision-lechuga` (7 */6h), `revision-tomate` (37 */6h) → webhook al bridge; `reporte-diario` (07:00) → tu canal | `brain/automations.sh` (idempotente) |
 | **MCP terra-domain** | Herramientas read-only: `get_farm_context`, `list_modules`, `get_crop_profile`, `latest_readings`, `telemetry_range`, `module_confidence`, `recent_alerts`, `daily_report_data` | `mcp.servers.terra-domain` |
 | **MCP terra-finance** | Ledger financiero (dueño de `movements`): `register_movement` ✏️, `void_movement` ✏️, `set_supply_cost` ✏️, `list_movements`, `cost_summary`, `list_supplies` | `mcp.servers.terra-finance` (`http://finance:7761/mcp`) |
-**Convención de nombres:** `crop_profiles.name` = `<especie>` o `<especie>_<variedad>` (`lechuga`, `lechuga_romana`); el experto es por especie (`experto-lechuga`). Nueva especie = nuevo workspace + entrada en `agents.list` + `allowedAgentIds` + automation (toca plantilla y `automations.sh` en el mismo commit).
+| **Portero (Fase 3)** | Gate de actuación: `terra-policy` MCP `:7762/mcp` + HTTP `:7762/healthz` y `/api/approvals` (PWA). Valida confianza/health/ventanas/techos/rate/serialización; publica `terra/{tenant}/{module}/{device}/cmd` solo si `policy_id` no vacío. Skills `aprobaciones` (gate humano) y `ordenes-trabajo` (tareas manuales) en `main`; expertos usan `propose_action` vía `terra-policy` (ver `cultivo-lechuga`/`cultivo-tomate` §6). | `services/policy/` · `mcp.servers.terra-policy` (`http://policy:7762/mcp`) · env `POLICY_ADMIN_TOKEN` (setup.sh) |
 
 **Modelo y canal: agnósticos (ADR-0001).** El template no trae ninguno preconfigurado — el deployer elige post-boot con `openclaw config set agents.defaults.model.primary <proveedor/modelo>` y el canal correspondiente (`channels login` / `config set channels.<c>...`). WebChat (Control UI) funciona sin configurar nada.
 
-**No hay actuación en Fase 1.** El portero llega en Fase 3; humanos operan por botones de Home Assistant (canal `request/`, ADR-0009).
+**Fase 3 — lazo cerrado:** el portero (`terra-policy` :7762) es el único que publica `cmd` con `policy_id`; expertos proponen vía `propose_action`, humanos aprueban vía `aprobaciones`, tareas manuales vía `ordenes-trabajo`. En Fase 1 solo había observación; humanos operaban por botones HA (`request/`, ADR-0009) que ahora también pasan por el portero.
 
 ## Instalación oficial (ADR-0018)
 

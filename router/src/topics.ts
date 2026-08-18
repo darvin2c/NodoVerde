@@ -94,6 +94,110 @@ export function buildInternalCmdTopic(tenant: string, mod: string, device: strin
   return `terra/${tenant}/${mod}/${device}/cmd`;
 }
 
+export function buildDeviceCmdTopic(hwId: string, device: string): string {
+  return `terra/${hwId}/${device}/cmd`;
+}
+
+// Aliases requeridos por el contrato Fase 3 (ver tarea)
+export const buildInternalCmd = buildInternalCmdTopic;
+export const buildDeviceCmd = buildDeviceCmdTopic;
+export const deviceCmdTopic = buildDeviceCmdTopic;
+export const internalCmdTopic = buildInternalCmdTopic;
+
+// ---------------------------------------------------------------------------
+// Actuadores — Fase 3 (lista cerrada)
+// ---------------------------------------------------------------------------
+
+export const ACTUATOR_DEVICES = [
+  "pump-recirc-01",
+  "valve-fill-01",
+  "doser-a-01",
+  "doser-b-01",
+  "doser-ph-01",
+] as const;
+
+export type ActuatorDevice = (typeof ACTUATOR_DEVICES)[number];
+
+const ACTUATOR_LOOKUP: Record<string, true> = {
+  "pump-recirc-01": true,
+  "valve-fill-01": true,
+  "doser-a-01": true,
+  "doser-b-01": true,
+  "doser-ph-01": true,
+};
+
+/** Retorna true si el device es un actuador del lazo cerrado (Fase 3). */
+export function isActuatorDevice(device: string): boolean {
+  return !!ACTUATOR_LOOKUP[device];
+}
+
+const BLOCKED_ACTIONS: Record<string, true> = { set: true, start: true, stop: true };
+
+/**
+ * Decide si un request interno debe reenviarse al plano dispositivo.
+ * Los actuadores con action set|start|stop son interceptados por el portero.
+ * Resto (read|capture|calibrate) y sensores → true.
+ */
+export function shouldForwardRequest(device: string, action: string): boolean {
+  if (isActuatorDevice(device) && BLOCKED_ACTIONS[action]) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Cmd payload — Fase 3
+// ---------------------------------------------------------------------------
+
+export type CmdAction = "start" | "stop" | "set";
+
+export type CmdPayload = {
+  action: CmdAction;
+  policy_id: string;
+  params?: Record<string, unknown>;
+};
+const VALID_ACTIONS: Record<string, true> = { start: true, stop: true, set: true };
+/**
+ * Parsea y valida el payload de un cmd interno.
+ * JSON estricto: debe ser objeto con action ∈ start|stop|set y policy_id string no vacío.
+ * Retorna null si inválido (JSON roto, no-JSON, sin policy_id, policy_id vacío, action inválida).
+ */
+export function parseCmdPayload(raw: Buffer | string | Uint8Array | null | undefined): CmdPayload | null {
+  if (raw == null) return null;
+  let str: string;
+  if (Buffer.isBuffer(raw)) str = raw.toString("utf8");
+  else if (raw instanceof Uint8Array) str = Buffer.from(raw).toString("utf8");
+  else if (typeof raw === "string") str = raw;
+  else return null;
+
+  // trim para tolerar whitespace rodeando JSON, pero payload vacío → null
+  if (!str.trim()) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(str);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+
+  const action = obj["action"];
+  const policy_id = obj["policy_id"];
+
+  if (typeof action !== "string" || !VALID_ACTIONS[action]) return null;
+  if (typeof policy_id !== "string" || policy_id.trim() === "") return null;
+
+  const result: CmdPayload = { action: action as CmdAction, policy_id };
+
+  if ("params" in obj && obj["params"] !== undefined) {
+    const params = obj["params"];
+    if (typeof params !== "object" || params === null || Array.isArray(params)) return null;
+    result.params = params as Record<string, unknown>;
+  }
+
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Clasificador de kind por segmentos
 // ---------------------------------------------------------------------------

@@ -1,0 +1,22 @@
+{
+  "name": "terra-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "E2E Fase 3 — lazo cerrado con actuadores contra stack vivo (nivel 3, no corre en pnpm test de paquetes)",
+  "scripts": {
+    "ec-baja": "tsx ec-baja.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "mqtt": "^5.10.2",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.0",
+    "typescript": "^7.0.2"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

@@ -76,59 +76,81 @@ esphome:
             }
             id(hw_id) = hw;
             ESP_LOGI("hw_id", "hw_id=%s raw_mac=%s", hw.c_str(), raw.c_str());
-    # 600: suscripciones a plano dispositivo terra/{hw_id}/+/request/+
-    # El fierro escucha solicitudes del router (que traduce desde plano interno).
+    # 600: suscripciones a plano dispositivo terra/{hw_id}/+/{request,cmd}
+    # Fase 3 (ADR-0002/0019): el fierro SOLO actúa por cmd con policy_id (defensa en profundidad).
+    # request/set ya no se traduce al dispositivo — las solicitudes de actuación las valida el
+    # portero (services/policy) y re-emite como cmd. El fierro escucha cmd en
+    # terra/{hw_id}/+/cmd y exige policy_id no vacío antes de actuar. request solo para
+    # read|capture|calibrate.
     - priority: 600
       then:
         - lambda: |-
             if (id(hw_id).empty()) {
-              ESP_LOGW("hw_id", "hw_id vacío, omitiendo suscripciones request");
+              ESP_LOGW("hw_id", "hw_id vacío, omitiendo suscripciones");
               return;
             }
-            std::string base = "terra/" + id(hw_id);
             auto *client = esphome::mqtt::global_mqtt_client;
             if (client == nullptr) {
-              ESP_LOGE("request", "mqtt client nulo, no se puede suscribir");
+              ESP_LOGE("mqtt", "mqtt client nulo, no se puede suscribir");
               return;
             }
             static bool subscribed = false;
             if (subscribed) return;
             subscribed = true;
-            // Cada actuador escucha .../request/set con payload ON/OFF o JSON start/stop
-            client->subscribe(base + "/pump-recirc-01/request/set", [](const std::string &topic, const std::string &payload) {
-              ESP_LOGD("request", "pump-recirc-01 set topic=%s payload=%s", topic.c_str(), payload.c_str());
-              if (payload.find("ON") != std::string::npos) id(pump_recirc).turn_on();
-              else if (payload.find("OFF") != std::string::npos) id(pump_recirc).turn_off();
-              else if (payload.find("\"start\"") != std::string::npos || payload.find("\"open\"") != std::string::npos) id(pump_recirc).turn_on();
-              else if (payload.find("\"stop\"") != std::string::npos || payload.find("\"close\"") != std::string::npos) id(pump_recirc).turn_off();
+            // Fase 3: actuación SOLO por cmd (terra/{hw_id}/{device}/cmd) con policy_id
+            // Defensa en profundidad: ignorar cmd sin policy_id no vacío
+            client->subscribe(base + "/+/cmd", [](const std::string &topic, const std::string &payload) {
+              if (payload.find("policy_id") == std::string::npos) {
+                ESP_LOGW("cmd", "cmd sin policy_id ignorado topic=%s payload=%s", topic.c_str(), payload.c_str());
+                return;
+              }
+              if (payload.find("\"policy_id\":\"\"") != std::string::npos || payload.find("\"policy_id\": \"\"") != std::string::npos) {
+                ESP_LOGW("cmd", "cmd con policy_id vacío ignorado topic=%s payload=%s", topic.c_str(), payload.c_str());
+                return;
+              }
+              // extraer device de topic: terra/{hw}/{device}/cmd
+              std::string device;
+              {
+                size_t last = topic.rfind("/");
+                size_t prev = topic.rfind("/", last - 1);
+                if (prev != std::string::npos && last != std::string::npos) device = topic.substr(prev + 1, last - prev - 1);
+              }
+              ESP_LOGD("cmd", "cmd %s payload=%s", device.c_str(), payload.c_str());
+              bool isStart = payload.find("\"start\"") != std::string::npos;
+              bool isStop = payload.find("\"stop\"") != std::string::npos;
+              bool isSet = payload.find("\"set\"") != std::string::npos;
+              bool vOn = payload.find("\"ON\"") != std::string::npos;
+              bool vOff = payload.find("\"OFF\"") != std::string::npos;
+              bool turnOn = false;
+              bool turnOff = false;
+              if (isStart) turnOn = true;
+              else if (isStop) turnOff = true;
+              else if (isSet) {
+                if (vOn) turnOn = true;
+                else if (vOff) turnOff = true;
+              }
+              if (device == "pump-recirc-01") {
+                if (turnOn) id(pump_recirc).turn_on();
+                else if (turnOff) id(pump_recirc).turn_off();
+              } else if (device == "valve-fill-01") {
+                if (turnOn) id(valve_fill).turn_on();
+                else if (turnOff) id(valve_fill).turn_off();
+              } else if (device == "doser-a-01") {
+                if (turnOn) id(doser_a).turn_on();
+                else if (turnOff) id(doser_a).turn_off();
+              } else if (device == "doser-b-01") {
+                if (turnOn) id(doser_b).turn_on();
+                else if (turnOff) id(doser_b).turn_off();
+              } else if (device == "doser-ph-01") {
+                if (turnOn) id(doser_ph).turn_on();
+                else if (turnOff) id(doser_ph).turn_off();
+              } else {
+                ESP_LOGW("cmd", "cmd para device desconocido %s", device.c_str());
+              }
             }, 1);
-            client->subscribe(base + "/valve-fill-01/request/set", [](const std::string &topic, const std::string &payload) {
-              ESP_LOGD("request", "valve-fill-01 set topic=%s payload=%s", topic.c_str(), payload.c_str());
-              if (payload.find("ON") != std::string::npos) id(valve_fill).turn_on();
-              else if (payload.find("OFF") != std::string::npos) id(valve_fill).turn_off();
-              else if (payload.find("\"start\"") != std::string::npos || payload.find("\"open\"") != std::string::npos) id(valve_fill).turn_on();
-              else if (payload.find("\"stop\"") != std::string::npos || payload.find("\"close\"") != std::string::npos) id(valve_fill).turn_off();
-            }, 1);
-            client->subscribe(base + "/doser-a-01/request/set", [](const std::string &topic, const std::string &payload) {
-              ESP_LOGD("request", "doser-a-01 set payload=%s", payload.c_str());
-              if (payload.find("ON") != std::string::npos || payload.find("\"start\"") != std::string::npos || payload.find("\"dose\"") != std::string::npos) id(doser_a).turn_on();
-              else if (payload.find("OFF") != std::string::npos || payload.find("\"stop\"") != std::string::npos) id(doser_a).turn_off();
-            }, 1);
-            client->subscribe(base + "/doser-b-01/request/set", [](const std::string &topic, const std::string &payload) {
-              ESP_LOGD("request", "doser-b-01 set payload=%s", payload.c_str());
-              if (payload.find("ON") != std::string::npos || payload.find("\"start\"") != std::string::npos || payload.find("\"dose\"") != std::string::npos) id(doser_b).turn_on();
-              else if (payload.find("OFF") != std::string::npos || payload.find("\"stop\"") != std::string::npos) id(doser_b).turn_off();
-            }, 1);
-            client->subscribe(base + "/doser-ph-01/request/set", [](const std::string &topic, const std::string &payload) {
-              ESP_LOGD("request", "doser-ph-01 set payload=%s", payload.c_str());
-              if (payload.find("ON") != std::string::npos || payload.find("\"start\"") != std::string::npos || payload.find("\"dose\"") != std::string::npos) id(doser_ph).turn_on();
-              else if (payload.find("OFF") != std::string::npos || payload.find("\"stop\"") != std::string::npos) id(doser_ph).turn_off();
-            }, 1);
-            // Sensores: request/read y request/calibrate (solo logging / trigger)
+            // Sensores: request/read y request/calibrate (solo logging / trigger) — se mantienen
             client->subscribe(base + "/+/request/read", [](const std::string &topic, const std::string &payload) {
               ESP_LOGI("request", "read solicitado topic=%s payload=%s", topic.c_str(), payload.c_str());
-              // Los sensores publican periódicamente; un read podría forzar publicación
-              // inmediata si se implementa (futuro). Por ahora solo log.
             }, 1);
             client->subscribe(base + "/+/request/calibrate", [](const std::string &topic, const std::string &payload) {
               ESP_LOGI("request", "calibrate solicitado topic=%s payload=%s", topic.c_str(), payload.c_str());
@@ -136,8 +158,7 @@ esphome:
             client->subscribe(base + "/cam-01/request/capture", [](const std::string &topic, const std::string &payload) {
               ESP_LOGI("request", "capture solicitado topic=%s payload=%s", topic.c_str(), payload.c_str());
             }, 1);
-            ESP_LOGI("request", "suscripciones request registradas base=%s", base.c_str());
-    # -100: publica online retenido en plano dispositivo
+            ESP_LOGI("mqtt", "suscripciones Fase 3 registradas base=%s (cmd + request read/calibrate/capture)", base.c_str());
     - priority: -100
       then:
         - mqtt.publish:
@@ -468,8 +489,11 @@ sensor:
 # ==============================================================================
 # ACTUADORES — switches GPIO con interlock físico + lógico
 # Cada switch publica estado en plano dispositivo terra/{hw_id}/{device}/switch/reading
-# (retain=true) y recibe comandos por terra/{hw_id}/{device}/request/set (qos1).
-# El router traduce desde plano interno terra/{tenant}/{module}/{device}/request/set.
+# (retain=true) y recibe comandos SOLO por terra/{hw_id}/{device}/cmd (qos1, Fase 3)
+# con payload Cmd {action, policy_id, params} — el router traduce desde plano interno
+# terra/{tenant}/{module}/{device}/cmd exigiendo policy_id no vacío. request/set ya
+# no actúa (lo intercepta el portero). Defensa en profundidad: el fierro ignora cmd
+# sin policy_id.
 # Interlock: dosificación solo si pump ON y nivel > mínimo (10%). Validación
 # lógica en firmware + interlock físico real que corta aunque falle software.
 # ==============================================================================
@@ -657,10 +681,9 @@ interval:
             long long ts = t.is_valid() ? (long long)t.timestamp * 1000 : (long long)millis();
             snprintf(buf, sizeof(buf), "{\"state\":\"online\",\"ts\":%lld}", ts);
             return std::string(buf);
-          retain: true
-          qos: 1
-
 # Nota: no hay on_message estático; las suscripciones a
-# terra/{hw_id}/+/request/# se crean en runtime en esphome.on_boot (prioridad 600)
-# via esphome::mqtt::global_mqtt_client->subscribe(...) con hw_id ya derivado.
-# El router traduce terra/{tenant}/{module}/{device}/request/{action} → terra/{hw_id}/...
+# terra/{hw_id}/+/cmd (Fase 3, actuación con policy_id) y
+# terra/{hw_id}/+/request/# (read/capture/calibrate) se crean en runtime en
+# esphome.on_boot (prioridad 600) via esphome::mqtt::global_mqtt_client->subscribe(...)
+# con hw_id ya derivado. El router traduce terra/{tenant}/{module}/{device}/cmd y
+# .../request/{action} → terra/{hw_id}/...

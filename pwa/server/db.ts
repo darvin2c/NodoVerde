@@ -40,7 +40,7 @@ export const telemetry = pgTable("telemetry", {
   raw: jsonb("raw")
 });
 
-export const movements = pgTable("movements", {
+export const movements: unknown = pgTable("movements", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   tenant: text("tenant").notNull(),
   ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
@@ -51,7 +51,7 @@ export const movements = pgTable("movements", {
   attribution: jsonb("attribution"),
   evidenceUrl: text("evidence_url"),
   note: text("note"),
-  anulaA: uuid("anula_a").references(() => movements.id),
+  anulaA: uuid("anula_a").references(() => (movements as unknown as { id: unknown }).id as never),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 

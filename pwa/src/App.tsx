@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { trpc } from "./trpc.ts";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "./components/ui/card.tsx";
 import { Badge } from "./components/ui/badge.tsx";
@@ -217,32 +217,175 @@ function FinanzasSection() {
 
 // ── PENDIENTES ──
 function PendientesSection() {
-  const { data } = useQuery({
+  const queryClient = useQueryClient();
+
+  const { data: alerts } = useQuery({
     queryKey: ["pending.alerts"],
     queryFn: () => trpc.pending.alerts.query({ tenant: "demo", limit: 10 }),
-    refetchInterval: 15000
+    refetchInterval: 15000,
+  });
+
+  const {
+    data: approvals,
+    isLoading: approvalsLoading,
+    error: approvalsError,
+  } = useQuery({
+    queryKey: ["pending.approvals", "demo"],
+    queryFn: () => trpc.pending.approvals.query({ tenant: "demo" }),
+    refetchInterval: 10000,
+  });
+
+  const {
+    data: orders,
+    isLoading: ordersLoading,
+    error: ordersError,
+  } = useQuery({
+    queryKey: ["pending.workOrders", "demo"],
+    queryFn: () => trpc.pending.workOrders.query({ tenant: "demo", status: "pending" }),
+    refetchInterval: 15000,
+  });
+
+  const decideMut = useMutation({
+    mutationFn: (vars: { id: string; decision: "approve" | "reject"; reason?: string }) =>
+      trpc.pending.decide.mutate(vars),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pending.approvals"] });
+      queryClient.invalidateQueries({ queryKey: ["pending.workOrders"] });
+    },
+  });
+
+  const completeMut = useMutation({
+    mutationFn: (vars: { id: string; note?: string }) => trpc.pending.completeWorkOrder.mutate(vars),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pending.workOrders"] });
+    },
   });
 
   return (
     <Card>
-      <CardHeader><CardTitle>PENDIENTES</CardTitle><CardDescription>alertas warn/critical + aprobaciones</CardDescription></CardHeader>
-      <CardContent className="space-y-3 text-sm">
-        {(!data || data.length === 0) && <p className="text-slate-400">sin alertas — todo tranquilo</p>}
-        {data?.map((a, i) => (
-          <div key={i} className="flex items-start justify-between gap-2 border-b border-slate-800 py-2">
-            <div>
-              <p className="font-medium">{a.name} <span className="text-xs text-slate-400">· {a.module}</span></p>
-              {a.device && <p className="text-xs text-slate-500">{a.device}</p>}
+      <CardHeader>
+        <CardTitle>PENDIENTES</CardTitle>
+        <CardDescription>alertas warn/critical + aprobaciones</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4 text-sm">
+        {/* Alertas */}
+        <div className="space-y-2">
+          {(!alerts || alerts.length === 0) && <p className="text-slate-400">sin alertas — todo tranquilo</p>}
+          {alerts?.map((a, i) => (
+            <div key={i} className="flex items-start justify-between gap-2 border-b border-slate-800 py-2">
+              <div>
+                <p className="font-medium">
+                  {a.name} <span className="text-xs text-slate-400">· {a.module}</span>
+                </p>
+                {a.device && <p className="text-xs text-slate-500">{a.device}</p>}
+              </div>
+              <Badge variant={a.severity === "critical" ? "destructive" : "warn"}>{a.severity}</Badge>
             </div>
-            <Badge variant={a.severity === "critical" ? "destructive" : "warn"}>{a.severity}</Badge>
-          </div>
-        ))}
-        <div className="rounded bg-slate-900 p-2 text-xs text-slate-400">aprobaciones: Fase 3 — placeholder</div>
+          ))}
+        </div>
+
+        {/* Aprobaciones */}
+        <div className="space-y-2">
+          <h4 className="font-semibold text-slate-200">Aprobaciones pendientes</h4>
+          {approvalsLoading && <p className="text-slate-400">cargando aprobaciones…</p>}
+          {approvalsError && (
+            <p className="text-red-400 text-xs">error al cargar aprobaciones: {(approvalsError as Error).message}</p>
+          )}
+          {!approvalsLoading && !approvalsError && (!approvals || approvals.length === 0) && (
+            <p className="text-slate-400">Sin aprobaciones pendientes</p>
+          )}
+          {approvals?.map((a: Record<string, unknown>) => {
+            const id = String(a.id ?? a.policy_id ?? "");
+            const device = String(a.device ?? "—");
+            const action = String(a.action ?? "—");
+            const params = a.params ? JSON.stringify(a.params) : "—";
+            const solicitante = String((a.requested_by as string) ?? (a.requestedBy as string) ?? "—");
+            const razon = String((a.reason as string) ?? "—");
+            const module = String((a.module as string) ?? "");
+            return (
+              <div key={id} className="rounded-lg border border-slate-800 p-3 space-y-2 bg-slate-900/50">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">
+                    {device} <span className="text-xs text-slate-400">· {action}</span>
+                    {module && <span className="text-xs text-slate-500"> · {module}</span>}
+                  </span>
+                  <Badge variant="secondary" className="text-xs">
+                    {(a.status as string) ?? "pending"}
+                  </Badge>
+                </div>
+                <p className="text-xs text-slate-400">
+                  params: <span className="font-mono text-slate-300">{params}</span>
+                </p>
+                <p className="text-xs text-slate-400">
+                  solicitante: <span className="text-slate-300">{solicitante}</span> · razón:{" "}
+                  <span className="text-slate-300">{razon}</span>
+                </p>
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => decideMut.mutate({ id, decision: "approve" })}
+                    disabled={decideMut.isPending}
+                    className="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Aprobar
+                  </button>
+                  <button
+                    onClick={() => decideMut.mutate({ id, decision: "reject", reason: "rechazado desde PWA" })}
+                    disabled={decideMut.isPending}
+                    className="rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    Rechazar
+                  </button>
+                </div>
+                {decideMut.isPending && <p className="text-xs text-slate-500">procesando…</p>}
+              </div>
+            );
+          })}
+          {decideMut.isError && (
+            <p className="text-xs text-red-400">error: {(decideMut.error as Error).message}</p>
+          )}
+        </div>
+
+        {/* Órdenes de trabajo */}
+        <div className="space-y-2">
+          <h4 className="font-semibold text-slate-200">Órdenes de trabajo</h4>
+          {ordersLoading && <p className="text-slate-400">cargando órdenes…</p>}
+          {ordersError && (
+            <p className="text-red-400 text-xs">error al cargar órdenes: {(ordersError as Error).message}</p>
+          )}
+          {!ordersLoading && !ordersError && (!orders || orders.length === 0) && (
+            <p className="text-slate-400">sin órdenes pendientes</p>
+          )}
+          {orders?.map((o: Record<string, unknown>) => {
+            const id = String(o.id ?? "");
+            const kind = String(o.kind ?? "—");
+            const instructions = String(o.instructions ?? "—");
+            const createdAt = o.created_at ?? o.createdAt ?? o.created_at;
+            const when = createdAt ? new Date(String(createdAt)).toLocaleString("es-PE") : "";
+            return (
+              <div key={id} className="rounded-lg border border-slate-800 p-3 space-y-2 bg-slate-900/50">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-slate-200">{kind}</span>
+                  {when && <span className="text-xs text-slate-500">{when}</span>}
+                </div>
+                <p className="text-xs text-slate-400">{instructions}</p>
+                <button
+                  onClick={() => completeMut.mutate({ id })}
+                  disabled={completeMut.isPending}
+                  className="rounded bg-slate-700 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-600 disabled:opacity-50"
+                >
+                  Marcar hecha
+                </button>
+              </div>
+            );
+          })}
+          {completeMut.isError && (
+            <p className="text-xs text-red-400">error: {(completeMut.error as Error).message}</p>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
 }
-
 // ── CÁMARAS ──
 function CamarasSection() {
   const { data } = useQuery({

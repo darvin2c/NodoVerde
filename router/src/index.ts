@@ -13,6 +13,9 @@ import {
   internalToDeviceTopic,
   shouldRetain,
   qosForKind,
+  parseCmdPayload,
+  shouldForwardRequest,
+  buildDeviceCmdTopic,
   type DeviceParsed,
   type InternalParsed,
 } from "./topics.js";
@@ -29,6 +32,7 @@ const DEVICE_SUBS = [
 ] as const;
 
 const INTERNAL_SUB = "terra/+/+/+/request/#";
+const INTERNAL_CMD_SUB = "terra/+/+/+/cmd";
 
 // Estado de discovery publicado por hw_id (para detectar re-asignación)
 const discoveryPublished = new Map<string, string>(); // hw_id → "tenant/module"
@@ -60,6 +64,11 @@ client.on("connect", () => {
   client.subscribe(INTERNAL_SUB, { qos: 1 }, (err) => {
     if (err) console.error(`[router] error subscribing ${INTERNAL_SUB}`, err);
     else console.log(`[router] suscrito ${INTERNAL_SUB}`);
+  });
+
+  client.subscribe(INTERNAL_CMD_SUB, { qos: 1 }, (err) => {
+    if (err) console.error(`[router] error subscribing ${INTERNAL_CMD_SUB}`, err);
+    else console.log(`[router] suscrito ${INTERNAL_CMD_SUB}`);
   });
 });
 
@@ -104,11 +113,17 @@ client.on("message", async (topic: string, payload: Buffer) => {
     return;
   }
 
-  // 2) ¿Es plano interno request? (6 seg, tenant/module)
+  // 2) ¿Es plano interno request o cmd? (cmd es 5 seg interno)
   const internalParsed = parseInternalTopic(topic);
-  if (internalParsed && internalParsed.kind === "request") {
-    await handleInternalRequest(topic, payload, internalParsed);
-    return;
+  if (internalParsed) {
+    if (internalParsed.kind === "request") {
+      await handleInternalRequest(topic, payload, internalParsed);
+      return;
+    }
+    if (internalParsed.kind === "cmd") {
+      await handleInternalCmd(topic, payload, internalParsed);
+      return;
+    }
   }
 
   // Descartar silenciosamente otros topics (podrían ser plano interno reading/status que no debemos reenviar)
@@ -197,6 +212,12 @@ async function handleInternalRequest(
 
   const { tenant, module: mod, device, action } = parsed;
 
+  // Fase 3: interceptar solicitudes de actuación hacia actuadores — las valida el portero
+  if (!shouldForwardRequest(device, action)) {
+    console.debug(`[router] request interceptada por portero ${topic} device=${device} action=${action} — no traducida`);
+    return;
+  }
+
   const identity = await resolveByModule(tenant, mod);
   if (!identity) {
     console.warn(`[router] (tenant,module) desconocido ${tenant}/${mod} — descartando ${topic}`);
@@ -216,6 +237,40 @@ async function handleInternalRequest(
     console.error(`[router] error publicando ${deviceTopic}`, err);
   }
 }
+
+async function handleInternalCmd(
+  topic: string,
+  payload: Buffer,
+  parsed: InternalParsed,
+): Promise<void> {
+  if (parsed.kind !== "cmd") return;
+
+  const { tenant, module: mod, device } = parsed;
+
+  // Exigir payload Cmd con policy_id no vacío — sin portero no hay actuación
+  const cmd = parseCmdPayload(payload);
+  if (!cmd) {
+    console.warn(`[router] cmd descartado sin policy_id o payload inválido ${topic}`);
+    return;
+  }
+
+  const identity = await resolveByModule(tenant, mod);
+  if (!identity) {
+    console.warn(`[router] (tenant,module) desconocido ${tenant}/${mod} — descartando ${topic}`);
+    return;
+  }
+
+  const deviceTopic = buildDeviceCmdTopic(identity.hwId, device);
+
+  try {
+    await publish(deviceTopic, payload, { qos: 1, retain: false });
+    console.log(`[router] cmd interno→device ${topic} → ${deviceTopic} policy_id=${cmd.policy_id} qos=1`);
+  } catch (err) {
+    console.error(`[router] error publicando cmd ${deviceTopic}`, err);
+  }
+}
+
+export { handleInternalRequest, handleInternalCmd };
 
 // ---------------------------------------------------------------------------
 // Shutdown limpio

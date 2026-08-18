@@ -6,6 +6,7 @@ import {
   SWITCH_DEVICES,
   switchOn,
   parseRequestPayload,
+  parseCmdPayload,
   decideAutoDose,
 } from "../src/node/behavior.js";
 
@@ -29,7 +30,7 @@ describe("switchOn refleja estado del mundo", () => {
   });
 });
 
-describe("parseRequestPayload tolera crudo y JSON", () => {
+describe("parseRequestPayload tolera crudo y JSON (read|capture|calibrate)", () => {
   it("crudo, JSON string, objeto v/action", () => {
     expect(parseRequestPayload("ON")).toBe("ON");
     expect(parseRequestPayload('"OFF"')).toBe("OFF");
@@ -38,8 +39,48 @@ describe("parseRequestPayload tolera crudo y JSON", () => {
     expect(parseRequestPayload('{"action":"calibrate"}')).toBe("calibrate");
     expect(parseRequestPayload("")).toBe("");
   });
+  it("Fase 3: request set ya no actúa — se ignora en emulador, pero el parser sigue tolerante", () => {
+    // el parser no decide actuación; el emulador ignora set
+    expect(parseRequestPayload('{"action":"set"}')).toBe("set");
+    expect(parseRequestPayload('{"v":"ON"}')).toBe("ON");
+  });
 });
 
+describe("parseCmdPayload Fase 3 — fierro solo por cmd con policy_id", () => {
+  it("start con policy_id y duration_ms", () => {
+    const p = parseCmdPayload(JSON.stringify({ action: "start", policy_id: "pol-123", params: { duration_ms: 1000 } }));
+    expect(p).not.toBeNull();
+    expect(p!.action).toBe("start");
+    expect(p!.policyId).toBe("pol-123");
+    expect(p!.durationMs).toBe(1000);
+  });
+  it("set con v ON", () => {
+    const p = parseCmdPayload(JSON.stringify({ action: "set", policy_id: "pol-abc", params: { v: "ON" } }));
+    expect(p!.action).toBe("set");
+    expect(p!.v).toBe("ON");
+  });
+  it("stop sin params", () => {
+    const p = parseCmdPayload(JSON.stringify({ action: "stop", policy_id: "pol-xyz" }));
+    expect(p!.action).toBe("stop");
+    expect(p!.policyId).toBe("pol-xyz");
+  });
+  it("rechaza cmd sin policy_id (defensa en profundidad)", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "start", params: { duration_ms: 500 } }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "" , params: { duration_ms: 500 } }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "   " , params: { duration_ms: 500 } }))).toBeNull();
+  });
+  it("rechaza action inválida o payload no JSON", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "dose", policy_id: "pol-1" }))).toBeNull();
+    expect(parseCmdPayload("ON")).toBeNull();
+    expect(parseCmdPayload("")).toBeNull();
+    expect(parseCmdPayload("not json")).toBeNull();
+  });
+  it("acepta policyId camelCase y duration en raíz", () => {
+    const p = parseCmdPayload(JSON.stringify({ action: "start", policyId: "pol-camel", duration_ms: 2000 }));
+    expect(p!.policyId).toBe("pol-camel");
+    expect(p!.durationMs).toBe(2000);
+  });
+});
 describe("auto-dosis del firmware (protección de cultivo)", () => {
   it("EC bajo el rango → dosifica nutriente", () => {
     const s = { ...createInitialModule("020000000001", "lechuga", [1.2, 1.8]), ec: 1.0 };
