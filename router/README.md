@@ -22,7 +22,10 @@ Plano interno (6 seg) — consumen HA/Telegraf/cerebro/Grafana
   terra/{tenant}/{module}/{device}/confidence/confidence
   terra/{tenant}/{module}/{device}/request/{action}
   terra/{tenant}/{module}/{device}/cmd
-  homeassistant/{component}/{unique_id}/config   (publicado por el router, nunca por el dispositivo)
+Plano plataforma (4 seg, contrato v0.5.0) — publican servicios de dominio directo al bus interno
+  terra/{tenant}/{module}/confidence             (RETAINED qos1, confianza global del módulo)
+  terra/{tenant}/{module}/health                 (RETAINED qos1, salud del módulo)
+  homeassistant/{component}/{unique_id}/config   (publicado SOLO por el router, nunca por el dispositivo)
 ```
 
 ## Flujos
@@ -32,7 +35,7 @@ Subscribe a `terra/+/+/+/reading`, `terra/+/+/+/event`, `terra/+/+/status/status
 - extrae `hw_id`, resuelve `hw_id → (tenant, módulo)` consultando `device_identities` (cache 30 s, invalidación por TTL).
 - si `hw_id` desconocido → `log warn` + descartar.
 - republica en el plano interno con **payload idéntico**; `retain` solo para `status` y readings de `switch` (`retain=true` y `qos1`), resto `retain=false` (`qos0` para lecturas de sensores).
-- al resolver un `hw_id` conocido por primera vez (o si cambió la asignación `UPDATE device_identities`), publica discovery de HA con `state_topic` internos (6 seg) y `retain=true`.
+- al resolver un `hw_id` conocido por primera vez (o si cambió la asignación `UPDATE device_identities`), publica discovery de HA con `state_topic` internos (6 seg para sensores/switches, 4 seg para confianza/salud) y `retain=true`.
 
 ### 2. Interno → device
 Subscribe a `terra/+/+/+/request/#` (plano interno, 6 seg). Por cada `request`:
@@ -44,8 +47,10 @@ Subscribe a `terra/+/+/+/request/#` (plano interno, 6 seg). Por cada `request`:
 Publicado por el router al confirmar una identidad. Incluye por nodo:
 - Sensores: `ec-01` (ec, mS/cm), `ph-01` (ph), `temp-01` (temp, °C), `level-01` (level, %), `flow-01` (flow, L/min), `climate-01` (air_temp °C + humidity %).
 - Switches: `pump-recirc-01`, `valve-fill-01`, `doser-a-01`, `doser-b-01`, `doser-ph-01`.
-Todos con `state_topic` interno, `availability_topic` interno y, para switches, `command_topic` interno `request/set`.
-
+- Sensores de módulo (plano plataforma 4 segmentos, contrato v0.5.0) — publicados por servicios de dominio, discovery por el router:
+  - `Módulo {mod} Confianza` — `terra/{tenant}/{module}/confidence` (RETAINED qos1, `{{ value_json.v }}` %, `mdi:gauge`, `unique_id: terra_{tenant}_{mod}_confidence`, `homeassistant/sensor/.../config`).
+  - `Módulo {mod} Salud` — `terra/{tenant}/{module}/health` (RETAINED qos1, `{{ value_json.state }}` ∈ ok/degraded/offline/blind, `mdi:heart-pulse`, `unique_id: terra_{tenant}_{mod}_health`).
+Todos los sensores/switches de dispositivo llevan `state_topic` interno 6 seg (`terra/{tenant}/{module}/{device}/{metric}/reading`), `availability_topic` interno y, para switches, `command_topic` interno `request/set`. Los dos sensores de módulo usan `state_topic` 4 seg (plataforma) y comparten `device` `terra_{tenant}_{mod}` (`Módulo {mod}`) en HA.
 ## Env
 
 | Variable | Default | Descripción |
@@ -67,5 +72,5 @@ Shutdown limpio en `SIGINT` / `SIGTERM` (cierra MQTT y pool `pg`).
 ## Referencias
 
 - ADR-0015: *Dispositivo tonto — identidad dinámica vía claiming y router*.
-- Contrato: `contract/asyncapi.yaml` v0.4.0.
+- Contrato: `contract/asyncapi.yaml` v0.5.0.
 - DB: `infra/db/init.sql` — tabla `device_identities`.

@@ -25,14 +25,17 @@ type Child = ReturnType<typeof spawn>;
 const children = new Map<string, Child>(); // "physics" | hw_id → proceso
 
 function spawnChild(label: string, script: string, extraArgs: string[]): Child {
-  const child = spawn("pnpm", ["exec", "tsx", script, ...args.filter((a) => a !== "--no-spawn"), ...extraArgs], {
+  // Un solo proceso por hijo (node + tsx loader, sin cadena pnpm→tsx→node) y SIN
+  // detached: mismo grupo que el supervisor → Ctrl-C y kills de árbol (hub/systemd)
+  // alcanzan a todo el mundo; no quedan emuladores huérfanos republicando.
+  const child = spawn(process.execPath, ["--import", "tsx", script, ...args.filter((a) => a !== "--no-spawn"), ...extraArgs], {
     stdio: ["ignore", "inherit", "inherit"],
     env: { ...process.env, PHYSICS_PORT: physicsPort, PHYSICS_URL: physicsUrl },
     cwd: resolve(here, ".."),
-    detached: true, // grupo de proceso propio: kill(-pid) mata pnpm+tsx+node completos
   });
   child.on("exit", (code, signal) => {
     console.log(`[supervisor] ${label} salió (code=${code} signal=${signal})`);
+    if (children.get(label) === child) children.delete(label);
     if (label === "physics") {
       console.error("[supervisor] la física murió — el mundo se detiene; reinicia el supervisor");
     }
@@ -41,6 +44,18 @@ function spawnChild(label: string, script: string, extraArgs: string[]): Child {
   console.log(`[supervisor] ${label} levantado (pid=${child.pid})`);
   return child;
 }
+
+// Guardia anti-huérfanos: si el supervisor muere por crash/salida limpia sin
+// completar shutdown(), mata a los hijos restantes (mismo proceso, kill directo).
+// Nota: SIGKILL al supervisor no ejecuta handlers — ese caso lo cubre el kill de
+// árbol del process manager (hijos en el mismo grupo).
+process.on("exit", () => {
+  for (const child of children.values()) {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+  }
+});
 
 function delay(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -169,12 +184,8 @@ const server = createServer((req, res) => {
         const child = children.get(hwId);
         if (child) {
           children.delete(hwId);
-          // desenchufar = muerte súbita de TODO el grupo (pnpm→tsx→node): ejercita LWT real
-          try {
-            process.kill(-child.pid!, "SIGKILL");
-          } catch {
-            child.kill("SIGKILL");
-          }
+          // desenchufar = muerte súbita del proceso único del nodo: ejercita LWT real
+          child.kill("SIGKILL");
         }
         await fetch(`${physicsUrl}/api/nodes/${hwId}`, { method: "DELETE" });
         if (b.unclaim) await unclaim(hwId);
@@ -188,7 +199,21 @@ const server = createServer((req, res) => {
 });
 
 // --- arranque ---
+// Aprovisionamiento (ADR-0016): la identidad de la finca (nombre/zona/coords/tz)
+// se escribe UNA vez desde el mundo físico (este yaml) hacia tenants, que es la
+// fuente de verdad que consulta el cerebro vía MCP. Idempotente.
+async function provisionTenant(): Promise<void> {
+  const name = `Finca ${tenant.charAt(0).toUpperCase()}${tenant.slice(1)}`;
+  await pool.query(
+    `INSERT INTO tenants (id, name, location_name, lat, lon, tz) VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO UPDATE SET location_name = $3, lat = $4, lon = $5, tz = $6`,
+    [tenant, name, finca.location.name, finca.location.lat, finca.location.lon, finca.location.tz],
+  );
+  console.log(`[supervisor] tenant ${tenant} provisionado: ${finca.location.name} (${finca.location.tz})`);
+}
+
 console.log(`[supervisor] mundo: ${finca.modules.length} nodos, tenant=${tenant}`);
+await provisionTenant();
 spawnChild("physics", "src/physics/engine.ts", []);
 await waitPhysics();
 for (const m of finca.modules) await spawnNode(m.hw_id);
@@ -199,11 +224,7 @@ async function shutdown(signal: string) {
   server.close();
   for (const [label, child] of children) {
     console.log(`[supervisor] SIGINT → ${label}`);
-    try {
-      process.kill(-child.pid!, "SIGINT");
-    } catch {
-      child.kill("SIGINT");
-    }
+    child.kill("SIGINT");
   }
   setTimeout(() => process.exit(0), 2000);
 }

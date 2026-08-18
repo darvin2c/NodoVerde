@@ -10,6 +10,7 @@ volumes:
   grafana_data:
   minio_data:
   ha_config:
+  openclaw_state:
 
 services:
   mosquitto:
@@ -45,6 +46,7 @@ services:
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./infra/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./infra/db/migrations/002-fase1.sql:/docker-entrypoint-initdb.d/02-fase1.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-terra} -d ${POSTGRES_DB:-terra}"]
       interval: 10s
@@ -163,3 +165,150 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+  # CEREBRO (ADR-0001/0012/0019 Fase 1) — OpenClaw gateway 24/7, multi-agente (orquestador + expertos)
+  # Imagen OFICIAL pre-construida (ADR-0018) — prohibido build desde fuente/fork.
+  # Tags disponibles: versionados (2026.7.1-2), latest, extended-stable. Verificar: docker manifest inspect ghcr.io/openclaw/openclaw:<tag>
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:2026.7.1-2
+    container_name: terra-openclaw
+    restart: unless-stopped
+    networks: [terra]
+    environment:
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      # LLM agnóstico (ADR-0001): descomenta/añade la env del proveedor que elijas
+      # y luego: openclaw config set agents.defaults.model.primary <proveedor/modelo>
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Canal agnóstico: idem con tu canal (ej. TELEGRAM_BOT_TOKEN para Telegram)
+      # TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TZ: America/Lima
+    ports:
+      - "18789:18789"
+    volumes:
+      - openclaw_state:/home/node/.openclaw
+      - ./brain/workspaces:/home/node/.openclaw/workspaces
+      - ./brain/openclaw.json:/home/node/.openclaw/openclaw.json
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Fase 1 — servicios de dominio (ADR-0010) ──
+
+  # Watchdog: salud de dispositivos (silencio/congelado/imposible/LWT) → health + alert
+  watchdog:
+    build: ./services/watchdog
+    container_name: terra-watchdog
+    restart: unless-stopped
+    networks: [terra]
+    environment:
+      MQTT_URL: mqtt://mosquitto:1883
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescale:
+        condition: service_healthy
+
+  # Termómetro de confianza (cálculo determinístico, NUNCA el LLM) → confidence retenido por módulo
+  confidence:
+    build: ./services/confidence
+    container_name: terra-confidence
+    restart: unless-stopped
+    networks: [terra]
+    environment:
+      MQTT_URL: mqtt://mosquitto:1883
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescale:
+        condition: service_healthy
+
+  # MCP read-only del dominio: las únicas herramientas del cerebro sobre datos de negocio
+  mcp-domain:
+    build: ./services/mcp-domain
+    container_name: terra-mcp-domain
+    restart: unless-stopped
+    networks: [terra]
+    ports:
+      - "7760:7760"
+    environment:
+      MCP_DOMAIN_PORT: "7760"
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+    depends_on:
+      timescale:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:7760/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Finance (Fase 2, ADR-0011): dueño único de movements. Auto-registro desde
+  # dosificaciones (MQTT) + MCP read/write (registro por chat, anulaciones, costos).
+  finance:
+    build: ./services/finance
+    container_name: terra-finance
+    restart: unless-stopped
+    networks: [terra]
+    ports:
+      - "7761:7761"
+    environment:
+      FINANCE_PORT: "7761"
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      MQTT_URL: mqtt://mosquitto:1883
+    depends_on:
+      timescale:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:7761/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Bridge MQTT→OpenClaw hooks (bus → cerebro). Observador: jamás publica cmd/request.
+  bridge:
+    build: ./services/bridge
+    container_name: terra-bridge
+    restart: unless-stopped
+    networks: [terra]
+    environment:
+      MQTT_URL: mqtt://mosquitto:1883
+      OPENCLAW_URL: http://openclaw:18789
+      OPENCLAW_HOOK_TOKEN: ${OPENCLAW_HOOK_TOKEN:-}
+      BRIDGE_NAME: ${BRIDGE_NAME:-terra-bridge}
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      BRIDGE_HTTP_PORT: 7765
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescale:
+        condition: service_healthy
+
+  # PWA terraOS — portada read-only (ADR-0014). tRPC server sirve API + frontend compilado.
+  pwa:
+    build: ./pwa
+    container_name: terra-pwa
+    restart: unless-stopped
+    networks: [terra]
+    ports:
+      - "7780:7780"
+    environment:
+      PWA_SERVER_PORT: "7780"
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      MQTT_URL: mqtt://mosquitto:1883
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescale:
+        condition: service_healthy

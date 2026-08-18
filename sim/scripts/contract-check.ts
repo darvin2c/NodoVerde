@@ -1,6 +1,9 @@
 // Contract test nivel 2: captura mensajes vivos del broker y los valida
 // contra los schemas de contract/asyncapi.yaml. Uso: pnpm contract [segundos]
-// Valida ambos planos MQTT (ADR-0015): dispositivo (5 seg) e interno (6 seg).
+// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1):
+//   - dispositivo (5 seg)  — terra/{hw_id}/{device}/{metric}/reading|event|status|confidence, request
+//   - interno (6 seg)      — terra/{tenant}/{module}/{device}/{metric}/reading|event|status|confidence, request/cmd
+//   - plataforma (4 seg)   — terra/{tenant}/{module}/confidence|health|alert (servicios de dominio DIRECTO, sin hw_id)
 import mqtt from "mqtt";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
@@ -19,11 +22,20 @@ for (const [name, schema] of Object.entries<any>(schemas)) {
 }
 
 // topic → schema según kind/estructura, adaptado por nº de segmentos
+// - 4 segmentos = plano plataforma: terra/{tenant}/{module}/confidence|health|alert (Fase 1, no pasa por router)
 // - 5 segmentos = plano dispositivo: terra/{hw_id}/{device}/{metric}/reading|event  o status/confidence, request en parts[3]
 // - 6 segmentos = plano interno:    terra/{tenant}/{module}/{device}/{metric}/reading|event  o request en parts[4]
 function schemaFor(topic: string): string | null {
   const parts = topic.split("/");
   if (parts[0] === "homeassistant") return null; // discovery HA: lo publica el router, no el fierro
+  // plano plataforma — 4 segmentos (Fase 1 "Cerebro observador")
+  if (parts.length === 4) {
+    const kind = parts[3];
+    if (kind === "confidence") return "Confidence";
+    if (kind === "health") return "Health";
+    if (kind === "alert") return "Alert";
+    return null;
+  }
   // plano dispositivo — 5 segmentos
   if (parts.length === 5) {
     if (parts[3] === "request") return "Request";
@@ -59,9 +71,10 @@ function schemaFor(topic: string): string | null {
   return null;
 }
 
-function planoFor(topic: string): "dispositivo" | "interno" | "otro" {
+function planoFor(topic: string): "plataforma" | "dispositivo" | "interno" | "otro" {
   const parts = topic.split("/");
   if (parts[0] !== "terra") return "otro";
+  if (parts.length === 4) return "plataforma";
   if (parts.length === 5) return "dispositivo";
   if (parts.length === 6) return "interno";
   if (parts.length === 7) return "interno";
@@ -120,6 +133,6 @@ setTimeout(() => {
     for (const e of errors.slice(0, 20)) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.4.0");
+  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.5.0");
   process.exit(0);
 }, seconds * 1000);

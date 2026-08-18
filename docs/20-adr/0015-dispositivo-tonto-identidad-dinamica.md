@@ -91,7 +91,7 @@ WiFi y dirección del broker se provisionan por **captive portal** en el primer 
 
 - **Firmware genérico único por diseño.** Un solo binario ESPHome para todos los nodos; la variante por módulo desaparece. Flashear es copiar el mismo firmware; la personalidad la da el claiming.
 - **Reasignar nodo = UPDATE en DB, cero reflasheo.** Mover un nodo de `mod-2` a `mod-5` o de una finca a otra no toca el fierro. Útil para reemplazos, préstamos y re-balanceo de carga.
-- **El sim emula `hw_id`s de fábrica.** `sim/fincas/demo.yaml` describe el mundo por `hw_id` (`modules: [{hw_id: "020000000001", crop: lechuga}, ...]`); el campo `id` anterior se reemplaza por `hw_id` y `tenant` deja de usarse en los topics del sim. El sim publica/escucha solo plano dispositivo (5 segmentos) y ya no publica HA discovery.
+- **El sim emula `hw_id`s de fábrica.** `sim/farms/demo.yaml` describe el mundo por `hw_id` (`modules: [{hw_id: "020000000001", crop: lechuga}, ...]`); el campo `id` anterior se reemplaza por `hw_id` y `tenant` deja de usarse en los topics del sim. El sim publica/escucha solo plano dispositivo (5 segmentos) y ya no publica HA discovery.
 - **El router está en el camino crítico de datos.** Sin router no hay telemetría en el plano interno ni comandos hacia el fierro. Debe ser stateless (salvo cache), con reconexión robusta a MQTT y Postgres, y métricas de `hw_id` desconocido / latencia de resolución.
 
 ## Limitación honesta
@@ -107,4 +107,4 @@ Donde ADR-0007 dice "Los topics MQTT incluyen el tenant: `terraos/{tenant}/{parc
 - Contrato autoritativo: `contract/asyncapi.yaml` v0.4.0 (ambos planos, schemas y reglas de retained/LWT).
 - DB: `infra/db/init.sql` — tabla `device_identities` y seed demo.
 - Router: `router/` — servicio de traducción.
-- Sim: `sim/fincas/demo.yaml` — mundo descrito por `hw_id`.
+- Sim: `sim/farms/demo.yaml` — mundo descrito por `hw_id`.

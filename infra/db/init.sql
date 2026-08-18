@@ -3,10 +3,17 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Tenants
+-- Tenants — la identidad de la finca vive AQUÍ (única fuente de verdad).
+-- El cerebro es agnóstico al lugar: consulta location_name/lat/lon/tz vía MCP
+-- (get_farm_context). Jamás se hardcodea en prompts ni skills.
+-- Quien la escribe: aprovisionamiento (sim supervisor en sim; edge en Fase 5).
 CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
+  name TEXT NOT NULL,              -- nombre display de la finca
+  location_name TEXT,              -- zona humana (ej: "Lambayeque, Perú")
+  lat DOUBLE PRECISION,            -- coordenadas para clima/ET0
+  lon DOUBLE PRECISION,
+  tz TEXT,                         -- IANA (ej: America/Lima) — reportes en hora local de la finca
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -75,30 +82,186 @@ SELECT create_hypertable('telemetry', 'time', chunk_time_interval => INTERVAL '7
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_lookup ON telemetry (tenant, module, device, metric, time DESC);
 
--- Movements (ADR-0011 — append-only ledger)
+-- Fase 1 "Cerebro observador" (ADR-0010) — confidence_history + alerts
+
+-- confidence_history: termómetro global por módulo (plano plataforma 4-seg terra/{tenant}/{module}/confidence)
+-- v -> value 0-100, sources (TEXT con JSON serializado) con desglose por variable (ec, ph, temp, level, flow, air_temp, humidity, photo)
+CREATE TABLE IF NOT EXISTS confidence_history (
+  time TIMESTAMPTZ NOT NULL,
+  tenant TEXT NOT NULL,
+  module TEXT NOT NULL,
+  value DOUBLE PRECISION,
+  sources TEXT, -- JSON serializado (telegraf CopyFrom no puede escribir jsonb; se parsea al leer)
+  FOREIGN KEY (tenant, module) REFERENCES modules(tenant, id)
+);
+
+SELECT create_hypertable('confidence_history', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_confidence_history_lookup ON confidence_history (tenant, module, time DESC);
+
+-- alerts: transiciones de salud por módulo (plano plataforma 4-seg terra/{tenant}/{module}/alert)
+-- NO retained; historificada para auditoría y Grafana. Health (4-seg retained) NO se ingesta.
+CREATE TABLE IF NOT EXISTS alerts (
+  time TIMESTAMPTZ NOT NULL,
+  tenant TEXT NOT NULL,
+  module TEXT NOT NULL,
+  name TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('info', 'warn', 'critical')),
+  device TEXT,
+  detail TEXT, -- JSON serializado (telegraf CopyFrom no escribe jsonb; se parsea al leer)
+  FOREIGN KEY (tenant, module) REFERENCES modules(tenant, id)
+);
+
+SELECT create_hypertable('alerts', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_alerts_lookup ON alerts (tenant, module, time DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity, time DESC);
+
+-- Movements (ADR-0011 — append-only ledger; Fase 2: imputación + inmutabilidad + dedup)
 CREATE TABLE IF NOT EXISTS movements (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant TEXT NOT NULL,
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  kind TEXT NOT NULL,
+  kind TEXT NOT NULL CONSTRAINT movements_kind_check CHECK (kind IN ('gasto','ingreso')),
   amount NUMERIC NOT NULL,
   currency TEXT NOT NULL DEFAULT 'PEN',
-  category TEXT,
+  category TEXT NOT NULL CONSTRAINT movements_category_check CHECK (category IN ('nutrientes','energia','agua','plantulas','mano_obra','empaque','transporte','venta_cosecha','software','otro')),
   attribution JSONB,
   evidence_url TEXT,
   voided_by UUID REFERENCES movements(id),
+  anula_a UUID REFERENCES movements(id),
+  source_event TEXT,
   source TEXT,
   created_by TEXT,
   note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_movements_source_event_unique
+  ON movements (tenant, source_event) WHERE source_event IS NOT NULL;
+
+-- supply_costs (ADR-0011 — costo unitario por insumo para valorización de dosis)
+CREATE TABLE IF NOT EXISTS supply_costs (
+  supply TEXT PRIMARY KEY,
+  unit TEXT NOT NULL,
+  cost_per_unit NUMERIC NOT NULL CHECK (cost_per_unit > 0),
+  currency TEXT NOT NULL DEFAULT 'PEN',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO supply_costs (supply, unit, cost_per_unit, currency) VALUES
+  ('nutriente_a', 'ml', 0.08, 'PEN'),
+  ('nutriente_b', 'ml', 0.08, 'PEN'),
+  ('ph_down',     'ml', 0.12, 'PEN')
+ON CONFLICT (supply) DO NOTHING;
+-- Precios placeholder: el agricultor los actualiza vía set_supply_cost (terra-finance).
+
+-- ── trigger: validación de imputación (ADR-0011) ───────────────────────────
+CREATE OR REPLACE FUNCTION validate_movement_attribution() RETURNS trigger AS $$
+DECLARE
+  _elem JSONB;
+  _pct NUMERIC;
+  _sum NUMERIC := 0;
+  _mod TEXT;
+  _cnt INT;
+BEGIN
+  IF NEW.category IS NULL THEN
+    RAISE EXCEPTION 'categoría obligatoria: todo movimiento debe tener categoría';
+  END IF;
+  IF NEW.attribution IS NULL THEN
+    RAISE EXCEPTION 'atribución obligatoria: debe ser un array no vacío de {module, pct}';
+  END IF;
+  IF jsonb_typeof(NEW.attribution) <> 'array' THEN
+    RAISE EXCEPTION 'atribución inválida: debe ser un array JSONB no vacío de {module, pct}';
+  END IF;
+  _cnt := jsonb_array_length(NEW.attribution);
+  IF _cnt IS NULL OR _cnt = 0 THEN
+    RAISE EXCEPTION 'atribución inválida: array vacío, debe tener al menos un elemento {module, pct}';
+  END IF;
+  FOR _elem IN SELECT * FROM jsonb_array_elements(NEW.attribution)
+  LOOP
+    _mod := _elem ->> 'module';
+    IF _mod IS NULL OR btrim(_mod) = '' THEN
+      RAISE EXCEPTION 'atribución inválida: cada elemento debe tener module (texto no vacío)';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM modules WHERE tenant = NEW.tenant AND id = _mod) THEN
+      RAISE EXCEPTION 'atribución inválida: módulo "%" no existe para tenant "%"', _mod, NEW.tenant;
+    END IF;
+    BEGIN
+      _pct := (_elem ->> 'pct')::NUMERIC;
+    EXCEPTION WHEN others THEN
+      RAISE EXCEPTION 'atribución inválida: pct debe ser número > 0 (módulo %)', _mod;
+    END;
+    IF _pct IS NULL OR _pct <= 0 THEN
+      RAISE EXCEPTION 'atribución inválida: pct debe ser > 0 (módulo %)', _mod;
+    END IF;
+    _sum := _sum + _pct;
+  END LOOP;
+  IF abs(_sum - 100) > 0.001 THEN
+    RAISE EXCEPTION 'atribución inválida: la suma de pct debe ser 100 (actual %)', _sum;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_movements_validate_attribution ON movements;
+CREATE TRIGGER trg_movements_validate_attribution
+  BEFORE INSERT ON movements
+  FOR EACH ROW EXECUTE FUNCTION validate_movement_attribution();
+
+-- ── inmutabilidad (ADR-0011): historia financiera inmutable ─────────────────
+CREATE OR REPLACE FUNCTION prevent_movement_delete() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'movimientos inmutables: no se permite borrar movimientos (use anulación)';
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_movements_no_delete ON movements;
+CREATE TRIGGER trg_movements_no_delete
+  BEFORE DELETE ON movements
+  FOR EACH ROW EXECUTE FUNCTION prevent_movement_delete();
+
+CREATE OR REPLACE FUNCTION enforce_movement_immutable_update() RETURNS trigger AS $$
+BEGIN
+  IF OLD.voided_by IS NULL AND NEW.voided_by IS NOT NULL
+     AND OLD.id IS NOT DISTINCT FROM NEW.id
+     AND OLD.tenant IS NOT DISTINCT FROM NEW.tenant
+     AND OLD.ts IS NOT DISTINCT FROM NEW.ts
+     AND OLD.kind IS NOT DISTINCT FROM NEW.kind
+     AND OLD.amount IS NOT DISTINCT FROM NEW.amount
+     AND OLD.currency IS NOT DISTINCT FROM NEW.currency
+     AND OLD.category IS NOT DISTINCT FROM NEW.category
+     AND OLD.attribution IS NOT DISTINCT FROM NEW.attribution
+     AND OLD.evidence_url IS NOT DISTINCT FROM NEW.evidence_url
+     AND OLD.anula_a IS NOT DISTINCT FROM NEW.anula_a
+     AND OLD.source_event IS NOT DISTINCT FROM NEW.source_event
+     AND OLD.source IS NOT DISTINCT FROM NEW.source
+     AND OLD.created_by IS NOT DISTINCT FROM NEW.created_by
+     AND OLD.note IS NOT DISTINCT FROM NEW.note
+     AND OLD.created_at IS NOT DISTINCT FROM NEW.created_at
+  THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.voided_by IS DISTINCT FROM NEW.voided_by THEN
+    RAISE EXCEPTION 'movimientos inmutables: solo se permite establecer voided_by de NULL a UUID (una vez)';
+  END IF;
+  RAISE EXCEPTION 'movimientos inmutables: no se permite modificar movimientos (solo voided_by de NULL a UUID)';
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_movements_immutable_update ON movements;
+CREATE TRIGGER trg_movements_immutable_update
+  BEFORE UPDATE ON movements
+  FOR EACH ROW EXECUTE FUNCTION enforce_movement_immutable_update();
+
 -- Seed: tenant demo
-INSERT INTO tenants (id, name) VALUES ('demo', 'Finca Demo - Lambayeque') ON CONFLICT (id) DO NOTHING;
+INSERT INTO tenants (id, name, location_name, lat, lon, tz) VALUES
+  ('demo', 'Finca Demo', 'Lambayeque, Perú', -6.486, -79.647, 'America/Lima')
+ON CONFLICT (id) DO NOTHING;
 
 -- Seed: perfiles de cultivo (fuente de verdad en runtime para cerebro/portero; ADR-0016)
 INSERT INTO crop_profiles (name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, notes) VALUES
-  ('lechuga', 1.2, 1.8, 5.8, 6.3, 18, 24, 'Lechuga hidropónica de hoja suelta; ciclo ~45 días Lambayeque. EC baja al inicio, subir a 1.6 en engorde. Renovar solución si EC deriva.'),
+  ('lechuga', 1.2, 1.8, 5.8, 6.3, 18, 24, 'Lechuga hidropónica de hoja suelta; ciclo ~45 días. EC baja al inicio, subir a 1.6 en engorde. Renovar solución si EC deriva.'),
   ('tomate', 2.0, 3.5, 5.5, 6.5, 18, 26, 'Tomate indeterminado hidropónico; EC se eleva progresivamente con carga de frutos. Vigilar blossom-end rot si EC/pH fuera de rango.')
 ON CONFLICT (name) DO NOTHING;
 
@@ -115,3 +278,55 @@ INSERT INTO device_identities (hw_id, tenant, module, claimed_by) VALUES
   ('020000000003', 'demo', 'mod-3', 'seed'),
   ('020000000004', 'demo', 'mod-4', 'seed')
 ON CONFLICT DO NOTHING;
+
+-- Seed kit estándar por módulo demo (12 dispositivos por módulo) — Fase 1
+INSERT INTO devices (tenant, module, id, kind) VALUES
+  ('demo', 'mod-1', 'ec-01', 'sensor'),
+  ('demo', 'mod-1', 'ph-01', 'sensor'),
+  ('demo', 'mod-1', 'temp-01', 'sensor'),
+  ('demo', 'mod-1', 'level-01', 'sensor'),
+  ('demo', 'mod-1', 'flow-01', 'sensor'),
+  ('demo', 'mod-1', 'climate-01', 'sensor'),
+  ('demo', 'mod-1', 'pump-recirc-01', 'switch'),
+  ('demo', 'mod-1', 'valve-fill-01', 'switch'),
+  ('demo', 'mod-1', 'doser-a-01', 'switch'),
+  ('demo', 'mod-1', 'doser-b-01', 'switch'),
+  ('demo', 'mod-1', 'doser-ph-01', 'switch'),
+  ('demo', 'mod-1', 'cam-01', 'camera'),
+  ('demo', 'mod-2', 'ec-01', 'sensor'),
+  ('demo', 'mod-2', 'ph-01', 'sensor'),
+  ('demo', 'mod-2', 'temp-01', 'sensor'),
+  ('demo', 'mod-2', 'level-01', 'sensor'),
+  ('demo', 'mod-2', 'flow-01', 'sensor'),
+  ('demo', 'mod-2', 'climate-01', 'sensor'),
+  ('demo', 'mod-2', 'pump-recirc-01', 'switch'),
+  ('demo', 'mod-2', 'valve-fill-01', 'switch'),
+  ('demo', 'mod-2', 'doser-a-01', 'switch'),
+  ('demo', 'mod-2', 'doser-b-01', 'switch'),
+  ('demo', 'mod-2', 'doser-ph-01', 'switch'),
+  ('demo', 'mod-2', 'cam-01', 'camera'),
+  ('demo', 'mod-3', 'ec-01', 'sensor'),
+  ('demo', 'mod-3', 'ph-01', 'sensor'),
+  ('demo', 'mod-3', 'temp-01', 'sensor'),
+  ('demo', 'mod-3', 'level-01', 'sensor'),
+  ('demo', 'mod-3', 'flow-01', 'sensor'),
+  ('demo', 'mod-3', 'climate-01', 'sensor'),
+  ('demo', 'mod-3', 'pump-recirc-01', 'switch'),
+  ('demo', 'mod-3', 'valve-fill-01', 'switch'),
+  ('demo', 'mod-3', 'doser-a-01', 'switch'),
+  ('demo', 'mod-3', 'doser-b-01', 'switch'),
+  ('demo', 'mod-3', 'doser-ph-01', 'switch'),
+  ('demo', 'mod-3', 'cam-01', 'camera'),
+  ('demo', 'mod-4', 'ec-01', 'sensor'),
+  ('demo', 'mod-4', 'ph-01', 'sensor'),
+  ('demo', 'mod-4', 'temp-01', 'sensor'),
+  ('demo', 'mod-4', 'level-01', 'sensor'),
+  ('demo', 'mod-4', 'flow-01', 'sensor'),
+  ('demo', 'mod-4', 'climate-01', 'sensor'),
+  ('demo', 'mod-4', 'pump-recirc-01', 'switch'),
+  ('demo', 'mod-4', 'valve-fill-01', 'switch'),
+  ('demo', 'mod-4', 'doser-a-01', 'switch'),
+  ('demo', 'mod-4', 'doser-b-01', 'switch'),
+  ('demo', 'mod-4', 'doser-ph-01', 'switch'),
+  ('demo', 'mod-4', 'cam-01', 'camera')
+ON CONFLICT (tenant, module, id) DO NOTHING;

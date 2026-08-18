@@ -24,6 +24,10 @@ status: vigente
 | **Policy module (portero)** | Código que revisa cada orden (del cerebro O de un botón humano) antes de tocar una bomba o válvula | El capataz que firma cada orden de trabajo |
 | **Watchdog** | Servicio que detecta lo que el dispositivo no sabe de sí mismo: silencios, sensores pegados, válvulas que mienten | El inspector de turno |
 | **Grafana** | Gráficas de análisis profundo y alertas de umbral simple | El tablero de instrumentos |
+| **PWA terraOS (`pwa/`)** | Portada read-only del sistema (ADR-0014): una pantalla con sistema, módulos, campo, finanzas, pendientes y cámaras | La página de resumen del periódico de la finca |
+| **Bridge (`services/bridge/`)** | Servicio delgado que traduce alertas del bus MQTT a mensajes para el cerebro (hooks de OpenClaw). Solo observa: jamás comanda | El mensajero que le avisa al administrador |
+| **MCP de dominio (`services/mcp-domain/`)** | Enchufe read-only por el que el cerebro consulta datos reales (telemetría, perfiles, confianza, alertas) | El archivo del cuaderno al que el administrador puede asomarse, pero no escribir |
+| **Termómetro (`services/confidence/`)** | Servicio que calcula la confianza por variable y por módulo (fuente × edad) y la publica al bus | El medidor de qué tan seguro está el sistema de lo que sabe |
 | **WhatsApp/Telegram** | Tu interfaz conversacional: reportes, fotos, aprobaciones | Tu walkie-talkie con el administrador |
 
 ## Conceptos

@@ -76,7 +76,7 @@ interno con payload idéntico. A la inversa, suscribe `terra/+/+/+/request/#`
 
 - **Un solo canal fierro↔producto: MQTT.** La física nunca toca la DB; el cerebro nunca toca la física. Si una flecha no existe con hardware real, no existe aquí.
 - **El fierro jamás publica `tenant`/`módulo`/`cultivo`.** Solo `hw_id`. La identidad se asigna en la DB vía claiming y la resuelve el router (ADR-0015).
-- **La declaración del dueño entra por la DB**, no por archivos (ADR-0016). Los YAML `fincas/demo.yaml` describen el mundo físico (nodos por `hw_id`); la verdad lógica vive en `device_identities`.
+- **La declaración del dueño entra por la DB**, no por archivos (ADR-0016). Los YAML `farms/demo.yaml` describen el mundo físico (nodos por `hw_id`); la verdad lógica vive en `device_identities`.
 - **Discovery HA lo publica la plataforma (router), nunca el dispositivo.**
 - **El lazo se cierra por el contrato:** comando (plano interno → router → dispositivo) → actuador → la física reacciona → siguiente medición lo refleja.
 - Física y Emulador son **procesos separados** (ADR-0017 implementado): `physics/engine.ts` expone la verdad del mundo por HTTP de laboratorio; cada `node/emulator.ts` es un ESP32 emulado (un proceso por `hw_id`) que mide la física vía HTTP y habla MQTT. Renode queda diferido: hoy no emula el WiFi del ESP32 (ver ADR-0017).
@@ -96,7 +96,7 @@ pnpm dev --offline --speed 60 --seed 42
 pnpm dev --scenario sensor_muerto --speed 240
 ```
 
-Al arrancar, el supervisor levanta la física y un proceso emulador por `hw_id` declarado en `fincas/demo.yaml`:
+Al arrancar, el supervisor levanta la física y un proceso emulador por `hw_id` declarado en `farms/demo.yaml`:
 
 ```
 [supervisor] mundo listo: 4 nodos (020000000001, 020000000002, 020000000003, 020000000004)
@@ -164,7 +164,7 @@ Un `Request` con payload crudo (`ON`/`OFF`) es válido (Fase 0); el resto exige 
 
 - **El sim es el fierro, no el producto.** Cerebro/HA/Telegraf/Router nunca se simulan.
 - **El fierro jamás publica `tenant`/`módulo`.** Todo topic del sim es `terra/{hw_id}/…` (5 segmentos). Si ves `terra/demo/…` en `sim/src/`, es un bug.
-- **Nadie de producción lee estos YAML** (ADR-0016): `config/` y `fincas/` son el
+- **Nadie de producción lee estos YAML** (ADR-0016): `config/` y `farms/` son el
   arranque del gemelo; la verdad de dominio en runtime vive en la DB (`crop_profiles` + `device_identities`).
 - **Sin puertas traseras:** todo lo que el mundo "declara" entra como lo haría un humano (claim en DB).
 - **Confianza honesta (ADR-0010):** la `confidence` publicada decae con la deriva

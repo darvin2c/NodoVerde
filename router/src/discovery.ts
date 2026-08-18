@@ -3,6 +3,10 @@
 // Plano interno: state_topic = terra/{tenant}/{module}/{device}/{metric}/reading (6 seg)
 //                availability = terra/{tenant}/{module}/{device}/status/status (6 seg)
 //                command_topic = terra/{tenant}/{module}/{device}/request/set (6 seg)
+// Plano plataforma (contrato v0.5.0, 4 segmentos — no pasa por router, lo publican
+// servicios de dominio directo al bus interno):
+//                terra/{tenant}/{module}/confidence  (confidence global del módulo)
+//                terra/{tenant}/{module}/health      (salud del módulo)
 
 import {
   buildInternalReadingTopic,
@@ -128,6 +132,62 @@ export function haSwitchDiscovery(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Sensores de módulo — plano plataforma 4 segmentos (contrato v0.5.0)
+// Publicados por servicios de dominio (confidence, watchdog) directamente al
+// bus interno; el router SOLO publica su discovery HA aquí. Retenidos qos1.
+// ---------------------------------------------------------------------------
+
+export function haModuleConfidenceDiscovery(
+  tenant: string,
+  mod: string,
+): { topic: string; payload: Record<string, unknown> } {
+  // Contrato v0.5.0: terra/{tenant}/{module}/confidence — 4 segmentos
+  const uniqueId = `terra_${tenant}_${mod}_confidence`;
+  const stateTopic = `terra/${tenant}/${mod}/confidence`;
+  const deviceId = `terra_${tenant}_${mod}`;
+  const payload: Record<string, unknown> = {
+    name: `Módulo ${mod} Confianza`,
+    unique_id: uniqueId,
+    state_topic: stateTopic,
+    value_template: "{{ value_json.v }}",
+    unit_of_measurement: "%",
+    icon: "mdi:gauge",
+    state_class: "measurement",
+    device: {
+      identifiers: [deviceId],
+      name: `Módulo ${mod}`,
+      manufacturer: "terraOS",
+    },
+  };
+  const topic = `homeassistant/sensor/${uniqueId}/config`;
+  return { topic, payload };
+}
+
+export function haModuleHealthDiscovery(
+  tenant: string,
+  mod: string,
+): { topic: string; payload: Record<string, unknown> } {
+  // Contrato v0.5.0: terra/{tenant}/{module}/health — 4 segmentos
+  const uniqueId = `terra_${tenant}_${mod}_health`;
+  const stateTopic = `terra/${tenant}/${mod}/health`;
+  const deviceId = `terra_${tenant}_${mod}`;
+  const payload: Record<string, unknown> = {
+    name: `Módulo ${mod} Salud`,
+    unique_id: uniqueId,
+    state_topic: stateTopic,
+    value_template: "{{ value_json.state }}",
+    icon: "mdi:heart-pulse",
+    device: {
+      identifiers: [deviceId],
+      name: `Módulo ${mod}`,
+      manufacturer: "terraOS",
+    },
+  };
+  const topic = `homeassistant/sensor/${uniqueId}/config`;
+  return { topic, payload };
+}
+
+// ---------------------------------------------------------------------------
 // Builder agregado: todos los discovery para un módulo resuelto
 // ---------------------------------------------------------------------------
 
@@ -161,6 +221,11 @@ export function buildDiscoveryConfigs(
       }),
     );
   }
+
+  // Sensores de módulo (plano plataforma 4 seg) — se publican junto al resto
+  // al resolver identidad, en el mismo flujo existente (publishDiscovery).
+  configs.push(haModuleConfidenceDiscovery(tenant, mod));
+  configs.push(haModuleHealthDiscovery(tenant, mod));
 
   return configs;
 }

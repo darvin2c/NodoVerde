@@ -1,12 +1,12 @@
 asyncapi: "3.0.0"
 info:
   title: terraOS Bus Contract
-  version: 0.4.0
+  version: 0.5.0
   description: |
-    Contrato AUTORITATIVO del bus MQTT de terraOS (ADR-0003, ADR-0015).
+    Contrato AUTORITATIVO del bus MQTT de terraOS (ADR-0003, ADR-0015, ADR-0010).
     Toda comunicación sim/edge/router/cerebro pasa por aquí.
 
-    Dos planos distinguibles por número de segmentos:
+    Tres planos distinguibles por número de segmentos:
 
     PLANO DISPOSITIVO — lo que publica y escucha el fierro (5 segmentos, hw_id de fábrica):
       terra/{hw_id}/{device}/{metric}/reading
@@ -34,6 +34,28 @@ info:
       - module: mod-1..mod-4 (escalable a árbol parent_id en DB, ADR-0016)
       - device/metric: idénticos al plano dispositivo
 
+    PLANO PLATAFORMA — servicios de dominio publican DIRECTAMENTE al plano interno (4 segmentos, no pasa por router, no hay hw_id):
+      terra/{tenant}/{module}/confidence          (RETAINED qos1 — publica services/confidence)
+      terra/{tenant}/{module}/health              (RETAINED qos1 — publica services/watchdog)
+      terra/{tenant}/{module}/alert               (NO retained qos1 — publica services/watchdog)
+
+      - confidence — termómetro global por módulo (ADR-0010). Payload Confidence {v: 0-100, ts: epoch_ms, sources: {ec?, ph?, temp?, level?, flow?, air_temp?, humidity?, photo?}}.
+        Publica: services/confidence. Es el termómetro global por módulo. Cálculo: confianza por variable = base_fuente × decaimiento_edad.
+        Base: sensor en vivo = min(95, confianza publicada por el dispositivo si existe); foto=75; reporte humano=65; sin dato=0.
+        Decaimiento por semivida: level 10min, ec 2h, ph 2h, temp 30min, flow 5min, air_temp/humidity 30min, photo 6h.
+        Global = promedio ponderado (pesos: ec 3, ph 3, temp 2, level 2, flow 1, air_temp 1, humidity 1, photo 1). Nunca 100.
+        RETAINED qos1. Consumen: HA/PWA/Grafana/Telegraf/cerebro. Se historifica en TimescaleDB (confidence_history).
+      - health — estado vivo por módulo. Payload Health {state: ok|degraded|offline|blind, ts: epoch_ms, devices: {<deviceId>: ok|silence|frozen|impossible|offline}}.
+        Publica: services/watchdog. blind = todos los sensores del módulo sin dato (señal de oficina activa). RETAINED qos1.
+        Consumen: HA/PWA/cerebro. NO se historifica (estado vivo, no historia).
+      - alert — transiciones de salud. Payload Alert {name, ts, severity: info|warn|critical, device?, detail?}.
+        Publica: watchdog (transiciones: device_silence, device_frozen, device_impossible, device_offline, device_recovered, module_blind, module_recovered).
+        NO retained, qos1. Consumen: HA/PWA/Grafana/Telegraf/cerebro. Se historifica en TimescaleDB (alerts).
+
+      - Quién PUBLICA: servicios de dominio (confidence, watchdog) DIRECTAMENTE. CERO actuación: ningún componente nuevo publica a cmd ni a request/.
+      - Quién CONSUME: HA / PWA / Grafana / Telegraf / cerebro (OpenClaw) / portero.
+      - Distinguible por nº de segmentos: plataforma=4, dispositivo=5, interno=6.
+
     Router de identidad (router/):
       - device→interno: subscribe plano dispositivo; resuelve hw_id→(tenant,module) en
         device_identities (cache con refresh); republica en plano interno con payload idéntico.
@@ -45,19 +67,23 @@ info:
 
     Reglas:
     - Solo lecturas instantáneas viajan por el bus. Historia y agregaciones: TimescaleDB.
-    - Retain: status (ambos planos) y readings de switches retenidos; resto no. HA discovery retenido.
+    - Retain: status (ambos planos), confidence y health de plataforma (retained), y readings de switches retenidos; alerts NO retained. HA discovery retenido.
     - LWT: cada dispositivo registra offline en terra/{hw_id}/{device}/status/status; el router
       lo traduce al plano interno.
     - QoS: sensores qos según kind (el sim hoy usa qos0 para lecturas — se mantiene por kind);
-      request/cmd qos1; status qos1 retained.
+      request/cmd qos1; status/health/confidence qos1 retained; alert qos1.
     - Timestamps: epoch milisegundos (entero, campo ts).
     - Home Assistant discovery: homeassistant/{component}/{unique_id}/config (retenido),
       publicado por el router; state_topic apunta al plano interno (6 segmentos).
     - Actuadores en plano interno reciben SOLO por cmd (con policy_id, desde el portero) y
       por request/{action} (solicitudes humanas validadas por el portero).
       EXCEPCIÓN dev Fase 0: HA publica a request/set (payload ON/OFF) y el sim actúa de portero.
+    - Fase 1 CERO actuación: ningún componente nuevo publica a cmd ni a request/.
 
     Historial:
+    - v0.5.0 (2026-08-16, ADR-0010 + Fase 1 "Cerebro observador"): plano plataforma 4-seg (confidence/health/alert por módulo).
+      Health y Alert schemas nuevos. Confidence/sources extendido con termómetro global ponderado y decaimiento por semivida. CERO actuación en Fase 1.
+      Servicios de dominio publican DIRECTO al plano interno (no pasa por router). Health retained no se ingesta; confidence y alert se historifican.
     - v0.4.0 (2026-08-16, ADR-0015): plano dispositivo por hw_id (5 seg), identidad dinámica
       vía DB (device_identities) + router. HA discovery pasa a publicarlo la plataforma.
       Plano interno (6 seg) idéntico al contrato v0.3.0. Spec desactualizado previo
@@ -86,7 +112,11 @@ channels:
 
   deviceEvent:
     address: terra/{hw_id}/{device}/{metric}/event
-    description: Evento del fierro (plano dispositivo, 5 seg).
+    description: |
+      Evento del fierro (plano dispositivo, 5 seg).
+      Eventos de dosis (Fase 2): dose_a_end/dose_b_end/dose_ph_end con detail {device, duration_ms, ml}
+      donde duration_ms = duración real del pulso del dosificador y ml = round(duration_ms/1000 * doserMlPerSecond *100)/100
+      (doserMlPerSecond=1.5 ml/s por defecto, expuesto por la física en GET /api/nodes/{hw_id}/state).
     parameters:
       hw_id: { description: "ID de fábrica" }
       device: { description: "ID del dispositivo" }
@@ -145,7 +175,12 @@ channels:
 
   event:
     address: terra/{tenant}/{module}/{device}/{metric}/event
-    description: Evento en plano interno (6 seg).
+    description: |
+      Evento en plano interno (6 seg).
+      Eventos de dosis (Fase 2, traducidos por el router desde el plano dispositivo):
+      dose_a_end/dose_b_end/dose_ph_end con detail {device, duration_ms, ml} donde
+      duration_ms = duración real del pulso y ml = round(duration_ms/1000 * doserMlPerSecond *100)/100
+      (doserMlPerSecond=1.5 ml/s por defecto). El schema Event.detail es free-form; solo se documenta aquí.
     parameters:
       tenant: { description: "Slug de finca" }
       module: { description: "ID de módulo" }
@@ -154,7 +189,6 @@ channels:
     messages:
       event:
         payload: { $ref: "#/components/schemas/Event" }
-
   status:
     address: terra/{tenant}/{module}/{device}/status/status
     description: |
@@ -215,6 +249,47 @@ channels:
       haDiscovery:
         payload: { $ref: "#/components/schemas/HaDiscovery" }
 
+  # ── Plano plataforma (4 segmentos — servicios de dominio DIRECTO) ──
+  moduleConfidence:
+    address: terra/{tenant}/{module}/confidence
+    description: |
+      Confianza global por módulo (plano plataforma, 4 seg). RETAINED qos1.
+      Lo publica DIRECTAMENTE services/confidence (sin pasar por router, no hay hw_id). CERO actuación.
+      Consumen: HA/PWA/Grafana/Telegraf/cerebro. Se historifica en TimescaleDB (confidence_history).
+      Termómetro global ADR-0010: v 0-100, sources con peso ponderado (ec 3, ph 3, temp 2, level 2, flow 1, air_temp 1, humidity 1, photo 1), decaimiento por semivida. Nunca 100.
+    parameters:
+      tenant: { description: "Slug de finca (demo)" }
+      module: { description: "ID de módulo" }
+    messages:
+      moduleConfidence:
+        payload: { $ref: "#/components/schemas/Confidence" }
+
+  moduleHealth:
+    address: terra/{tenant}/{module}/health
+    description: |
+      Salud por módulo (plano plataforma, 4 seg). RETAINED qos1.
+      Lo publica DIRECTAMENTE services/watchdog. Estado vivo, NO se historifica.
+      Consumen: HA/PWA/cerebro. blind = todos los sensores del módulo sin dato.
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+    messages:
+      moduleHealth:
+        payload: { $ref: "#/components/schemas/Health" }
+
+  moduleAlert:
+    address: terra/{tenant}/{module}/alert
+    description: |
+      Alerta por módulo (plano plataforma, 4 seg). NO retained, qos1.
+      Lo publica services/watchdog en transiciones: device_silence, device_frozen, device_impossible, device_offline, device_recovered, module_blind, module_recovered.
+      Consumen: HA/PWA/Grafana/Telegraf/cerebro. Se historifica en TimescaleDB (alerts).
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+    messages:
+      moduleAlert:
+        payload: { $ref: "#/components/schemas/Alert" }
+
 components:
   schemas:
     Reading:
@@ -247,7 +322,44 @@ components:
         sources:
           type: object
           additionalProperties: { type: number }
-          description: desglose por fuente (ADR-0010). Fase 0 sim publica self=100.
+          description: "desglose por fuente (ADR-0010). Fase 0 sim publica self=100. Fase 1 módulo: {ec?, ph?, temp?, level?, flow?, air_temp?, humidity?, photo?} con pesos ec 3, ph 3, temp 2, level 2, flow 1, air_temp 1, humidity 1, photo 1."
+    Health:
+      type: object
+      required: [state, ts, devices]
+      properties:
+        state:
+          type: string
+          enum: [ok, degraded, offline, blind]
+          description: blind = todos los sensores del módulo sin dato (señal de oficina activa)
+        ts: { type: integer, description: epoch ms }
+        devices:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, silence, frozen, impossible, offline]
+          description: estado por deviceId
+    Alert:
+      type: object
+      required: [name, ts, severity]
+      properties:
+        name:
+          type: string
+          description: "ej: device_silence, device_frozen, device_impossible, device_offline, device_recovered, module_blind, module_recovered"
+        ts: { type: integer, description: epoch ms }
+        severity:
+          type: string
+          enum: [info, warn, critical]
+        device:
+          type: string
+          description: deviceId opcional (cuando la alerta es por dispositivo)
+        detail:
+          type: object
+          additionalProperties: true
+          description: |
+            Contexto opcional de la alerta. DEBE ser plano de escalares (string/number/bool)
+            — Telegraf aplana el objeto un nivel para historificar (detail_*) y las claves
+            string nuevas deben declararse en infra/telegraf/telegraf.conf json_string_fields.
+            Claves en uso (watchdog): kind, metric, value, from, to.
     Cmd:
       type: object
       required: [action, policy_id]
