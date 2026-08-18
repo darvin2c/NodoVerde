@@ -10,12 +10,14 @@ import {
   buildDeviceStatusTopic,
   buildDeviceConfidenceTopic,
   buildDeviceRequestTopic,
+  buildDeviceCmdTopic,
   buildInternalReadingTopic,
   buildInternalEventTopic,
   buildInternalStatusTopic,
   buildInternalConfidenceTopic,
   buildInternalRequestTopic,
   buildInternalCmdTopic,
+  deviceCmdTopic,
   deviceToInternalTopic,
   internalToDeviceTopic,
   shouldRetain,
@@ -23,6 +25,10 @@ import {
   getKind,
   isDeviceTopic,
   isInternalTopic,
+  isActuatorDevice,
+  shouldForwardRequest,
+  parseCmdPayload,
+  ACTUATOR_DEVICES,
 } from "../src/topics.js";
 
 // Helpers de datos
@@ -417,5 +423,166 @@ describe("contrato — 5 vs 6 segmentos distinguibles", () => {
       const internal = deviceToInternalTopic(t, TENANT, "mod-1")!;
       expect(internal).toContain(TENANT);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fase 3 — actuadores y enforcement de cmd
+// ---------------------------------------------------------------------------
+
+describe("isActuatorDevice", () => {
+  it("reconoce los 5 actuadores del lazo cerrado", () => {
+    expect(ACTUATOR_DEVICES).toHaveLength(5);
+    for (const dev of ACTUATOR_DEVICES) {
+      expect(isActuatorDevice(dev)).toBe(true);
+    }
+    expect(isActuatorDevice("pump-recirc-01")).toBe(true);
+    expect(isActuatorDevice("valve-fill-01")).toBe(true);
+    expect(isActuatorDevice("doser-a-01")).toBe(true);
+    expect(isActuatorDevice("doser-b-01")).toBe(true);
+    expect(isActuatorDevice("doser-ph-01")).toBe(true);
+  });
+
+  it("rechaza sensores y dispositivos no actuadores", () => {
+    expect(isActuatorDevice("ec-01")).toBe(false);
+    expect(isActuatorDevice("ph-01")).toBe(false);
+    expect(isActuatorDevice("temp-01")).toBe(false);
+    expect(isActuatorDevice("level-01")).toBe(false);
+    expect(isActuatorDevice("flow-01")).toBe(false);
+    expect(isActuatorDevice("climate-01")).toBe(false);
+    expect(isActuatorDevice("cam-01")).toBe(false);
+    expect(isActuatorDevice("")).toBe(false);
+    expect(isActuatorDevice("pump-recirc-02")).toBe(false);
+    expect(isActuatorDevice("PUMP-RECIRC-01")).toBe(false);
+  });
+});
+
+describe("shouldForwardRequest", () => {
+  it("bloquea set/start/stop hacia actuadores (intercepta el portero)", () => {
+    for (const dev of ACTUATOR_DEVICES) {
+      expect(shouldForwardRequest(dev, "set")).toBe(false);
+      expect(shouldForwardRequest(dev, "start")).toBe(false);
+      expect(shouldForwardRequest(dev, "stop")).toBe(false);
+    }
+  });
+
+  it("permite read/capture/calibrate hacia actuadores", () => {
+    for (const dev of ACTUATOR_DEVICES) {
+      expect(shouldForwardRequest(dev, "read")).toBe(true);
+      expect(shouldForwardRequest(dev, "capture")).toBe(true);
+      expect(shouldForwardRequest(dev, "calibrate")).toBe(true);
+    }
+  });
+
+  it("permite todo hacia sensores (no actuadores)", () => {
+    const sensors = ["ec-01", "ph-01", "level-01", "temp-01", "flow-01"];
+    for (const dev of sensors) {
+      expect(shouldForwardRequest(dev, "set")).toBe(true);
+      expect(shouldForwardRequest(dev, "start")).toBe(true);
+      expect(shouldForwardRequest(dev, "stop")).toBe(true);
+      expect(shouldForwardRequest(dev, "read")).toBe(true);
+      expect(shouldForwardRequest(dev, "capture")).toBe(true);
+      expect(shouldForwardRequest(dev, "calibrate")).toBe(true);
+    }
+  });
+
+  it("action desconocida hacia actuador se permite (solo bloquea set/start/stop)", () => {
+    expect(shouldForwardRequest("pump-recirc-01", "unknown")).toBe(true);
+    expect(shouldForwardRequest("doser-a-01", "")).toBe(true);
+  });
+});
+
+describe("parseCmdPayload", () => {
+  it("válido con policy_id y action start + params", () => {
+    const raw = JSON.stringify({ action: "start", policy_id: "pol-123", params: { duration_ms: 2000 } });
+    expect(parseCmdPayload(raw)).toEqual({ action: "start", policy_id: "pol-123", params: { duration_ms: 2000 } });
+  });
+
+  it("válido con Buffer y con Uint8Array", () => {
+    const obj = { action: "set", policy_id: "pol-abc", params: { v: "ON" } };
+    const str = JSON.stringify(obj);
+    expect(parseCmdPayload(Buffer.from(str))).toEqual(obj);
+    expect(parseCmdPayload(new TextEncoder().encode(str))).toEqual(obj);
+  });
+
+  it("válido sin params", () => {
+    const raw = JSON.stringify({ action: "stop", policy_id: "pol-xyz" });
+    expect(parseCmdPayload(raw)).toEqual({ action: "stop", policy_id: "pol-xyz" });
+  });
+
+  it("rechaza sin policy_id", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "start", params: {} }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start" }))).toBeNull();
+  });
+
+  it("rechaza policy_id vacío o solo espacios", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "" }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "   " }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: " " }))).toBeNull();
+  });
+
+  it("rechaza policy_id no string", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: 123 }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: null }))).toBeNull();
+  });
+
+  it("rechaza action inválida", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "invalid", policy_id: "pol-1" }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "read", policy_id: "pol-1" }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "", policy_id: "pol-1" }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: null, policy_id: "pol-1" }))).toBeNull();
+  });
+
+  it("rechaza JSON roto", () => {
+    expect(parseCmdPayload("{not json")).toBeNull();
+    expect(parseCmdPayload("{")).toBeNull();
+    expect(parseCmdPayload("")).toBeNull();
+    expect(parseCmdPayload("   ")).toBeNull();
+  });
+
+  it("rechaza crudo no-JSON y tipos inválidos", () => {
+    expect(parseCmdPayload("ON")).toBeNull();
+    expect(parseCmdPayload("OFF")).toBeNull();
+    expect(parseCmdPayload(null)).toBeNull();
+    expect(parseCmdPayload(undefined)).toBeNull();
+    expect(parseCmdPayload(JSON.stringify([1, 2, 3]))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify("string"))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify(123))).toBeNull();
+  });
+
+  it("rechaza params no objeto", () => {
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "pol-1", params: "ON" }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "pol-1", params: 123 }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "pol-1", params: [] }))).toBeNull();
+    expect(parseCmdPayload(JSON.stringify({ action: "start", policy_id: "pol-1", params: null }))).toBeNull();
+  });
+
+  it("tolera whitespace alrededor de JSON", () => {
+    const raw = '  \n' + JSON.stringify({ action: "stop", policy_id: "pol-1" }) + '  \n';
+    expect(parseCmdPayload(raw)).toEqual({ action: "stop", policy_id: "pol-1" });
+  });
+});
+
+describe("buildDeviceCmdTopic / deviceCmdTopic", () => {
+  it("construye topic dispositivo cmd (4 segmentos)", () => {
+    expect(buildDeviceCmdTopic(HW1, "pump-recirc-01")).toBe(`terra/${HW1}/pump-recirc-01/cmd`);
+    expect(deviceCmdTopic(HW1, "doser-a-01")).toBe(`terra/${HW1}/doser-a-01/cmd`);
+    // alias buildDeviceCmd
+  });
+
+  it("buildInternalCmdTopic roundtrip vía parseInternalTopic", () => {
+    const topic = buildInternalCmdTopic(TENANT, MOD, "valve-fill-01");
+    expect(topic).toBe(`terra/${TENANT}/${MOD}/valve-fill-01/cmd`);
+    const parsed = parseInternalTopic(topic);
+    expect(parsed).toEqual({ plane: "internal", tenant: TENANT, module: MOD, device: "valve-fill-01", kind: "cmd" });
+    expect(parseTopic(topic)?.plane).toBe("internal");
+  });
+
+  it("deviceCmdTopic formato distinguible de internal cmd", () => {
+    const devTopic = buildDeviceCmdTopic(HW1, "doser-b-01");
+    const intTopic = buildInternalCmdTopic(TENANT, MOD, "doser-b-01");
+    expect(devTopic.split("/").length).toBe(4);
+    expect(intTopic.split("/").length).toBe(5);
+    expect(devTopic).not.toBe(intTopic);
   });
 });

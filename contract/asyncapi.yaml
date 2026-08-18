@@ -1,7 +1,7 @@
 asyncapi: "3.0.0"
 info:
   title: terraOS Bus Contract
-  version: 0.5.0
+  version: 0.6.0
   description: |
     Contrato AUTORITATIVO del bus MQTT de terraOS (ADR-0003, ADR-0015, ADR-0010).
     Toda comunicación sim/edge/router/cerebro pasa por aquí.
@@ -13,13 +13,17 @@ info:
       terra/{hw_id}/{device}/{metric}/event
       terra/{hw_id}/{device}/status/status
       terra/{hw_id}/{device}/confidence/confidence
-      terra/{hw_id}/{device}/request/{action}        (el fierro ESCUCHA; action ∈ set|read|capture|calibrate)
+      terra/{hw_id}/{device}/request/{action}        (el fierro ESCUCHA; action ∈ read|capture|calibrate)
+      terra/{hw_id}/{device}/cmd                     (el fierro ESCUCHA; actuación SOLO aquí, con policy_id)
 
       - hw_id: 12 hex minúsculas (MAC de fábrica sin dos puntos). Demo: 020000000001..020000000004.
       - device: ec-01, ph-01, temp-01, level-01, flow-01, climate-01,
                 pump-recirc-01, valve-fill-01, doser-a-01, doser-b-01, doser-ph-01, cam-01
       - metric: ec | ph | temp | level | flow | air_temp | humidity | switch | photo | confidence
       - El hardware JAMÁS conoce tenant/module/cultivo; solo su hw_id.
+      - Fase 3 (ADR-0002/0019): la actuación llega al fierro SOLO por cmd (payload Cmd con
+        policy_id emitido por el portero). request/set ya no se traduce al plano dispositivo:
+        las solicitudes de actuación (humanas o del cerebro) las intercepta y valida el portero.
 
     PLANO INTERNO — resuelto por el router; consumen HA/Telegraf/cerebro/Grafana (6 segmentos):
       terra/{tenant}/{module}/{device}/{metric}/reading
@@ -60,8 +64,16 @@ info:
       - device→interno: subscribe plano dispositivo; resuelve hw_id→(tenant,module) en
         device_identities (cache con refresh); republica en plano interno con payload idéntico.
         hw_id desconocido → log + descartar.
-      - interno→device: subscribe terra/+/+/+/request/#; resuelve (tenant,module)→hw_id;
+      - interno→device (request): subscribe terra/+/+/+/request/#; resuelve (tenant,module)→hw_id;
         republica como terra/{hw_id}/{device}/request/{action}, payload intacto, qos1.
+        EXCEPCIÓN Fase 3: request con action ∈ set|start|stop hacia dispositivos actuadores
+        (pump-recirc-01, valve-fill-01, doser-a-01, doser-b-01, doser-ph-01) NO se traducen —
+        las intercepta el portero (services/policy), que valida y emite cmd. Solo pasan
+        read|capture|calibrate.
+      - interno→device (cmd, Fase 3): subscribe terra/+/+/+/cmd; exige payload Cmd con
+        policy_id no vacío (sin policy_id → log + descartar: comando sin portero jamás
+        llega al actuador); resuelve (tenant,module)→hw_id; republica como
+        terra/{hw_id}/{device}/cmd, payload intacto, qos1.
       - HA discovery: lo publica el router (nunca el dispositivo) al resolver un hw_id
         conocido por primera vez; state_topics con 6 segmentos.
 
@@ -76,11 +88,20 @@ info:
     - Home Assistant discovery: homeassistant/{component}/{unique_id}/config (retenido),
       publicado por el router; state_topic apunta al plano interno (6 segmentos).
     - Actuadores en plano interno reciben SOLO por cmd (con policy_id, desde el portero) y
-      por request/{action} (solicitudes humanas validadas por el portero).
-      EXCEPCIÓN dev Fase 0: HA publica a request/set (payload ON/OFF) y el sim actúa de portero.
-    - Fase 1 CERO actuación: ningún componente nuevo publica a cmd ni a request/.
+      solicitudes por request/{action} (humanas HA o del cerebro), que el portero intercepta,
+      valida (límites, confianza mínima, autonomía por clase) y convierte en cmd o rechaza.
+      Fase 3 (ADR-0002/0009/0010/0019): services/policy es el ÚNICO publicador de cmd.
+      El portero audita cada propuesta en DB (action_requests) y notifica por chat vía bridge.
+      El watchdog verifica el efecto físico de cada cmd (comando dosificar → EC debió subir;
+      si no, alerta critical verification_failed).
 
     Historial:
+    - v0.6.0 (2026-08-18, ADR-0002/0019/0020 + Fase 3 "Lazo cerrado"): plano dispositivo gana
+      terra/{hw_id}/{device}/cmd (actuación SOLO con policy_id del portero). request/set deja de
+      traducirse al fierro: el router lo intercepta hacia actuadores y el portero (services/policy)
+      valida y emite cmd. Alert gana verification_failed (verificación cruzada comando→efecto,
+      detail con policy_id). Órdenes de trabajo manuales (ADR-0010) vía DB work_orders + chat,
+      sin canal MQTT nuevo.
     - v0.5.0 (2026-08-16, ADR-0010 + Fase 1 "Cerebro observador"): plano plataforma 4-seg (confidence/health/alert por módulo).
       Health y Alert schemas nuevos. Confidence/sources extendido con termómetro global ponderado y decaimiento por semivida. CERO actuación en Fase 1.
       Servicios de dominio publican DIRECTO al plano interno (no pasa por router). Health retained no se ingesta; confidence y alert se historifican.
@@ -150,15 +171,32 @@ channels:
   deviceRequest:
     address: terra/{hw_id}/{device}/request/{action}
     description: |
-      El fierro ESCUCHA solicitudes aquí (plano dispositivo, 5 seg). El router traduce
-      desde terra/{tenant}/{module}/{device}/request/{action}. action ∈ set|read|capture|calibrate.
+      El fierro ESCUCHA solicitudes NO actuadoras aquí (plano dispositivo, 5 seg). El router traduce
+      desde terra/{tenant}/{module}/{device}/request/{action}. action ∈ read|capture|calibrate.
+      Fase 3: set/start/stop ya NO llegan al fierro por request — la actuación llega SOLO por cmd.
     parameters:
       hw_id: { description: "ID de fábrica" }
       device: { description: "ID del dispositivo" }
-      action: { description: "Acción solicitada", enum: [set, read, capture, calibrate] }
+      action: { description: "Acción solicitada", enum: [read, capture, calibrate] }
     messages:
       request:
         payload: { $ref: "#/components/schemas/Request" }
+
+  deviceCmd:
+    address: terra/{hw_id}/{device}/cmd
+    description: |
+      Comando de actuación al fierro (plano dispositivo, 5 seg). Fase 3 (ADR-0002/0019/0020).
+      Lo publica ÚNICAMENTE el router, traducido desde terra/{tenant}/{module}/{device}/cmd,
+      y solo si el payload trae policy_id no vacío (emitido por services/policy).
+      El fierro ignora cmd sin policy_id (defensa en profundidad).
+      Convenciones de payload Cmd: action=start con params.duration_ms (pulso dosificador/válvula);
+      action=stop (apagar); action=set con params.v=ON|OFF (switch sostenido).
+    parameters:
+      hw_id: { description: "ID de fábrica" }
+      device: { description: "ID del actuador" }
+    messages:
+      cmd:
+        payload: { $ref: "#/components/schemas/Cmd" }
 
   # ── Plano interno (6 segmentos — plataforma) ──
   reading:
@@ -214,7 +252,10 @@ channels:
 
   cmd:
     address: terra/{tenant}/{module}/{device}/cmd
-    description: Comando a actuador en plano interno (6 seg). Solo el policy module publica aquí.
+    description: |
+      Comando a actuador en plano interno (5 seg). SOLO el policy module (services/policy) publica aquí.
+      El router lo traduce a terra/{hw_id}/{device}/cmd exigiendo policy_id no vacío.
+      El watchdog lo observa para verificación cruzada comando→efecto (Fase 3).
     parameters:
       tenant: { description: "Slug de finca" }
       module: { description: "ID de módulo" }
@@ -344,7 +385,7 @@ components:
       properties:
         name:
           type: string
-          description: "ej: device_silence, device_frozen, device_impossible, device_offline, device_recovered, module_blind, module_recovered"
+          description: "ej: device_silence, device_frozen, device_impossible, device_offline, device_recovered, module_blind, module_recovered, verification_failed (Fase 3: cmd sin efecto físico esperado)"
         ts: { type: integer, description: epoch ms }
         severity:
           type: string
@@ -360,17 +401,25 @@ components:
             — Telegraf aplana el objeto un nivel para historificar (detail_*) y las claves
             string nuevas deben declararse en infra/telegraf/telegraf.conf json_string_fields.
             Claves en uso (watchdog): kind, metric, value, from, to.
+            Claves Fase 3 (verification_failed): kind (dose|fill|recirc), policy_id, metric, baseline, last.
     Cmd:
       type: object
       required: [action, policy_id]
       properties:
         action: { type: string, enum: [start, stop, set] }
-        policy_id: { type: string }
-        params: { type: object, additionalProperties: true }
+        policy_id:
+          type: string
+          description: "ID de auditoría emitido por el portero (services/policy, formato pol-<uuid>). El router descarta cmd sin policy_id; el fierro lo ignora (defensa en profundidad)."
+        params:
+          type: object
+          additionalProperties: true
+          description: "Convenciones: start con {duration_ms} = pulso temporizado (dosificador/válvula); set con {v: ON|OFF} = estado sostenido de switch; stop = apagar."
     Request:
       description: |
-        Solicitud humana (ADR-0009). Actuador: action=start|stop|set. Sensor: read|calibrate.
-        Cámara: capture. En dev Fase 0, HA switch publica payload crudo ON/OFF a request/set.
+        Solicitud humana (ADR-0009) o del cerebro en plano interno. Actuador: action=start|stop|set
+        (la intercepta el portero: valida y emite cmd, nunca llega cruda al fierro — Fase 3).
+        Sensor: read|calibrate. Cámara: capture. HA switch publica payload crudo ON/OFF a request/set
+        (el portero lo interpreta como start/stop).
       oneOf:
         - type: string # crudo Fase 0: "ON" | "OFF"
         - type: object # forma futura: {"v": ...} | {"action": ...}

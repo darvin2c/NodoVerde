@@ -1,4 +1,4 @@
-import { initTRPC } from "@trpc/server";
+import { initTRPC, TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { z } from "zod";
 import superjson from "superjson";
@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import { getDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
+import { fetchJson, PolicyError } from "./policy.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -159,7 +160,7 @@ export const appRouter = t.router({
       })
   }),
 
-  // ── PENDIENTES: alertas recientes ──
+  // ── PENDIENTES: alertas recientes + aprobaciones y órdenes (Fase 3) ──
   pending: t.router({
     alerts: t.procedure
       .input(z.object({ tenant: z.string().optional().default("demo"), limit: z.number().min(1).max(50).optional().default(10) }).optional())
@@ -176,9 +177,78 @@ export const appRouter = t.router({
         } catch {
           return [];
         }
-      })
-  }),
+      }),
 
+    approvals: t.procedure
+      .input(z.object({ tenant: z.string().optional().default("demo") }).optional())
+      .query(async ({ input }) => {
+        const tenant = input?.tenant ?? "demo";
+        try {
+          const data = await fetchJson<{ actions: unknown[] } | unknown[]>("/api/approvals", { params: { tenant } });
+          if (Array.isArray(data)) return data as unknown as unknown[];
+          if (data && typeof data === "object" && "actions" in (data as Record<string, unknown>)) {
+            return (data as { actions: unknown[] }).actions;
+          }
+          return data as unknown as unknown[];
+        } catch (err) {
+          const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+        }
+      }),
+
+    decide: t.procedure
+      .input(z.object({ id: z.string().min(1), decision: z.enum(["approve", "reject"]), reason: z.string().optional() }))
+      .mutation(async ({ input }) => {
+        const action = input.decision === "approve" ? "approve" : "reject";
+        const body: Record<string, unknown> = { by: "pwa" };
+        if (input.reason) body.reason = input.reason;
+        try {
+          const data = await fetchJson<unknown>(`/api/approvals/${encodeURIComponent(input.id)}/${action}`, {
+            method: "POST",
+            body,
+          });
+          return data;
+        } catch (err) {
+          const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+        }
+      }),
+
+    workOrders: t.procedure
+      .input(z.object({ tenant: z.string().optional().default("demo"), status: z.enum(["pending", "done", "cancelled"]).optional() }).optional())
+      .query(async ({ input }) => {
+        const tenant = input?.tenant ?? "demo";
+        const status = input?.status;
+        try {
+          const data = await fetchJson<{ orders: unknown[] } | unknown[]>("/api/work-orders", {
+            params: { tenant, status },
+          });
+          if (Array.isArray(data)) return data as unknown as unknown[];
+          if (data && typeof data === "object" && "orders" in (data as Record<string, unknown>)) {
+            return (data as { orders: unknown[] }).orders;
+          }
+          return data as unknown as unknown[];
+        } catch (err) {
+          const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+        }
+      }),
+
+    completeWorkOrder: t.procedure
+      .input(z.object({ id: z.string().min(1), note: z.string().optional() }))
+      .mutation(async ({ input }) => {
+        try {
+          const data = await fetchJson<unknown>(`/api/work-orders/${encodeURIComponent(input.id)}/complete`, {
+            method: "POST",
+            body: { by: "pwa", note: input.note },
+          });
+          return data;
+        } catch (err) {
+          const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+        }
+      }),
+  }),
   // ── CÁMARAS: último evento photo por módulo ──
   cameras: t.router({
     lastPhoto: t.procedure

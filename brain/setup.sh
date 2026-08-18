@@ -68,6 +68,24 @@ else
   echo "→ OPENCLAW_GATEWAY_TOKEN ya existe en .env (no se regenera)."
 fi
 
+# 1c) Asegurar POLICY_ADMIN_TOKEN (portero Fase 3 — auth PWA→policy)
+POLICY_TOKEN="${POLICY_ADMIN_TOKEN:-}"
+if [[ -z "$POLICY_TOKEN" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    POLICY_TOKEN="$(openssl rand -hex 32)"
+  else
+    POLICY_TOKEN="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  fi
+  echo "→ POLICY_ADMIN_TOKEN no estaba en .env — generado uno nuevo."
+  {
+    echo "# Portero — token admin PWA→policy (Fase 3)"
+    echo "POLICY_ADMIN_TOKEN=$POLICY_TOKEN"
+  } >> "$ENV_FILE"
+  export POLICY_ADMIN_TOKEN="$POLICY_TOKEN"
+else
+  echo "→ POLICY_ADMIN_TOKEN ya existe en .env (no se regenera)."
+fi
+
 # 2) Generar openclaw.json desde template
 if [[ ! -f "$TEMPLATE" ]]; then
   echo "ERROR: no existe $TEMPLATE" >&2; exit 1
@@ -134,4 +152,5 @@ echo "  - OPENCLAW_STATE_DIR=/home/node/.openclaw (volumen openclaw_state)"
 echo "  - openclaw.json: generado aquí, MUTABLE en runtime (config set persiste en él; bind rw sobre el volumen — docker permite mounts anidados)"
 echo "  - Workspaces versionados: ./brain/workspaces/main → orquestador; ./brain/workspaces/experto-* → expertos (ADR-0019). Un solo bind: nueva especie no toca compose."
 echo "  - Tag verificado: ghcr.io/openclaw/openclaw:2026.7.1-2 (ADR-0018). Otros tags: docker manifest inspect ghcr.io/openclaw/openclaw:latest"
+echo "  - POLICY_ADMIN_TOKEN: generado en .env si faltaba (auth PWA→portero :7762); usado por compose como \${POLICY_ADMIN_TOKEN:-dev-admin-token}"
 echo ""

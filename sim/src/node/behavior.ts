@@ -34,6 +34,7 @@ export function switchOn(state: ModuleState, device: string): boolean {
 }
 
 // payload de request: acepta crudo ("ON"), JSON string o {"v": ...} / {"action": ...}
+// Solo para read|capture|calibrate (Fase 3: request set ya no actúa — ver emulator.ts)
 export function parseRequestPayload(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return trimmed;
@@ -57,6 +58,57 @@ export function parseRequestPayload(raw: string): string {
   }
 }
 
+export type CmdPayload = {
+  action: "start" | "stop" | "set";
+  policyId: string;
+  durationMs?: number;
+  v?: "ON" | "OFF";
+};
+
+// Fase 3: el fierro solo actúa por cmd con policy_id no vacío (defensa en profundidad).
+// Payload contrato Cmd: {action:'start'|'stop'|'set', policy_id, params?:{duration_ms?, v?}}
+export function parseCmdPayload(raw: string): CmdPayload | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  const action = obj.action;
+  if (action !== "start" && action !== "stop" && action !== "set") return null;
+  const policyIdRaw = obj.policy_id ?? obj.policyId;
+  if (typeof policyIdRaw !== "string" || policyIdRaw.trim().length === 0) return null;
+  const policyId = policyIdRaw.trim();
+  let durationMs: number | undefined;
+  let v: "ON" | "OFF" | undefined;
+  const params = obj.params;
+  if (params !== null && typeof params === "object" && !Array.isArray(params)) {
+    const p = params as Record<string, unknown>;
+    const d = p.duration_ms ?? p.durationMs;
+    if (typeof d === "number" && Number.isFinite(d) && d >= 0) durationMs = Math.round(d);
+    // también aceptar string numérico
+    if (typeof d === "string" && d.trim().length > 0) {
+      const n = Number(d);
+      if (Number.isFinite(n) && n >= 0) durationMs = Math.round(n);
+    }
+    const vv = p.v;
+    if (vv === "ON" || vv === "OFF") v = vv;
+  }
+  // tolerancia: algunos productores ponen v o duration_ms a nivel raíz (no params)
+  if (v === undefined) {
+    const vv = obj.v;
+    if (vv === "ON" || vv === "OFF") v = vv;
+  }
+  if (durationMs === undefined) {
+    const dd = obj.duration_ms ?? obj.durationMs;
+    if (typeof dd === "number" && Number.isFinite(dd) && dd >= 0) durationMs = Math.round(dd);
+  }
+  return { action: action as CmdPayload["action"], policyId, ...(durationMs !== undefined ? { durationMs } : {}), ...(v !== undefined ? { v } : {}) };
+}
 export type CropTargets = { ec: [number, number]; ph: [number, number] };
 export type AutoDoseAction =
   | { device: "doser-a-01" | "doser-b-01"; event: "auto_dose"; durationMs: number }

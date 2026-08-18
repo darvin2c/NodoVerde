@@ -25,6 +25,7 @@ import {
   SWITCH_DEVICES,
   switchOn,
   parseRequestPayload,
+  parseCmdPayload,
   decideAutoDose,
 } from "./behavior.js";
 import type { CropTargets } from "./behavior.js";
@@ -78,7 +79,6 @@ async function fetchState(): Promise<PhysicsState | null> {
     return null;
   }
 }
-
 async function actuate(device: string, command: string, durationMs?: number): Promise<void> {
   try {
     await fetch(`${physicsUrl}/api/nodes/${hwId}/actuate`, {
@@ -89,6 +89,12 @@ async function actuate(device: string, command: string, durationMs?: number): Pr
   } catch (e) {
     console.error(`[node ${hwId}] actuate falló (¿física caída?):`, e);
   }
+}
+
+function defaultDurationFor(device: string): number | undefined {
+  if (device === "doser-a-01" || device === "doser-b-01" || device === "doser-ph-01") return 2000;
+  if (device === "valve-fill-01") return 20000;
+  return undefined;
 }
 // --- MQTT setup: cliente principal + un cliente LWT por dispositivo ---
 const devices = [...SENSOR_DEVICES, ...SWITCH_DEVICES];
@@ -113,34 +119,75 @@ async function connectMqtt(): Promise<void> {
   client.on("connect", async () => {
     console.log(`[node ${hwId}] mqtt connected`);
     client!.subscribe(`terra/${hwId}/+/request/#`, { qos: 1 }, (err) => {
-      if (err) console.error(`[node ${hwId}] subscribe error`, err);
+      if (err) console.error(`[node ${hwId}] subscribe request error`, err);
+    });
+    client!.subscribe(`terra/${hwId}/+/cmd`, { qos: 1 }, (err) => {
+      if (err) console.error(`[node ${hwId}] subscribe cmd error`, err);
     });
   });
 
   client.on("message", async (topic, payload) => {
-    // plano dispositivo: terra/{hw_id}/{device}/request/{action}
+    const raw = payload.toString();
     const parts = topic.split("/");
+    // --- cmd plano dispositivo: terra/{hw_id}/{device}/cmd (4 segmentos) — Fase 3: SOLO por cmd con policy_id ---
+    if (parts.length === 4 && parts[3] === "cmd") {
+      const device = parts[2];
+      const parsed = parseCmdPayload(raw);
+      if (!parsed) {
+        console.log(`[node ${hwId}] cmd ignorado sin policy_id o inválido device=${device} raw=${raw.slice(0, 120)}`);
+        return;
+      }
+      console.log(`[node ${hwId}] cmd ${device} ${parsed.action} policy=${parsed.policyId} v=${parsed.v ?? ""} dur=${parsed.durationMs ?? ""}`);
+      const st = await fetchState();
+      const ts = st?.ts ?? (lastTs || Date.now());
+      const isOn = parsed.action === "start" || (parsed.action === "set" && parsed.v === "ON");
+      const isOff = parsed.action === "stop" || (parsed.action === "set" && parsed.v === "OFF");
+      if (parsed.action === "start") {
+        const dur = parsed.durationMs ?? defaultDurationFor(device);
+        await actuate(device, "ON", dur);
+        if (device === "valve-fill-01") await publish(client!, eventTopic(hwId, device, "level"), buildEvent("fill_start", ts, { device }));
+        else if (device === "doser-a-01") await publish(client!, eventTopic(hwId, device, "ec"), buildEvent("dose_a", ts, { device }));
+        else if (device === "doser-b-01") await publish(client!, eventTopic(hwId, device, "ec"), buildEvent("dose_b", ts, { device }));
+        else if (device === "doser-ph-01") await publish(client!, eventTopic(hwId, device, "ph"), buildEvent("dose_ph", ts, { device }));
+        else if (device === "pump-recirc-01") {} // sin evento inicio específico
+        await publishRetained(client!, readingTopic(hwId, device, "switch"), buildReading("ON", ts));
+      } else if (parsed.action === "stop") {
+        await actuate(device, "OFF");
+        if (OFF_EVENTS[device]) {
+          offsSeen.set(device, ts);
+          await publish(client!, eventTopic(hwId, device, OFF_EVENTS[device].metric), buildEvent(OFF_EVENTS[device].name, ts, { device }));
+        }
+        await publishRetained(client!, readingTopic(hwId, device, "switch"), buildReading("OFF", ts));
+      } else if (parsed.action === "set") {
+        const cmd = parsed.v === "ON" ? "ON" : "OFF";
+        const dur = parsed.durationMs ?? (cmd === "ON" ? defaultDurationFor(device) : undefined);
+        await actuate(device, cmd, dur);
+        if (isOn) {
+          if (device === "valve-fill-01") await publish(client!, eventTopic(hwId, device, "level"), buildEvent("fill_start", ts, { device }));
+          else if (device === "doser-a-01") await publish(client!, eventTopic(hwId, device, "ec"), buildEvent("dose_a", ts, { device }));
+          else if (device === "doser-b-01") await publish(client!, eventTopic(hwId, device, "ec"), buildEvent("dose_b", ts, { device }));
+          else if (device === "doser-ph-01") await publish(client!, eventTopic(hwId, device, "ph"), buildEvent("dose_ph", ts, { device }));
+        } else if (isOff && OFF_EVENTS[device]) {
+          offsSeen.set(device, ts);
+          await publish(client!, eventTopic(hwId, device, OFF_EVENTS[device].metric), buildEvent(OFF_EVENTS[device].name, ts, { device }));
+        }
+        await publishRetained(client!, readingTopic(hwId, device, "switch"), buildReading(cmd, ts));
+      }
+      return;
+    }
+    // plano dispositivo request: terra/{hw_id}/{device}/request/{action} (5 segmentos)
     if (parts.length !== 5 || parts[3] !== "request") return;
     const device = parts[2];
     const action = parts[4];
-    const cmd = parseRequestPayload(payload.toString());
+    const cmd = parseRequestPayload(raw);
     console.log(`[node ${hwId}] request ${device}/${action} ${cmd}`);
     const st = await fetchState();
     const ts = st?.ts ?? (lastTs || Date.now()); // jamás mezclar reloj real si ya conocemos el sim
 
     if (action === "set") {
-      await actuate(device, cmd);
-      if (device === "valve-fill-01" && cmd === "ON") await publish(client!, eventTopic(hwId, device, "level"), buildEvent("fill_start", ts, { device }));
-      if (device === "doser-a-01" && cmd === "ON") await publish(client!, eventTopic(hwId, device, "ec"), buildEvent("dose_a", ts, { device }));
-      if (device === "doser-b-01" && cmd === "ON") await publish(client!, eventTopic(hwId, device, "ec"), buildEvent("dose_b", ts, { device }));
-      if (device === "doser-ph-01" && cmd === "ON") await publish(client!, eventTopic(hwId, device, "ph"), buildEvent("dose_ph", ts, { device }));
-      // OFF manual (sin timer): el cierre también es evento; los OFF por timer los drena el loop desde la física
-      if (cmd === "OFF" && OFF_EVENTS[device]) {
-        offsSeen.set(device, ts); // el timer ya no expirará: no duplicar con el drenaje
-        await publish(client!, eventTopic(hwId, device, OFF_EVENTS[device].metric), buildEvent(OFF_EVENTS[device].name, ts, { device }));
-      }
-      const v = cmd === "ON" || cmd === "OFF" ? cmd : "OFF";
-      await publishRetained(client!, readingTopic(hwId, device, "switch"), buildReading(v, ts));
+      // Fase 3: request set ya no actúa — el fierro solo obedece cmd con policy_id (defensa en profundidad)
+      console.log(`[node ${hwId}] request set ignorado (usar cmd) device=${device} payload=${raw.slice(0, 80)}`);
+      return;
     } else if (action === "read") {
       if (!st) return;
       const metric = DEVICE_METRICS[device] ?? "unknown";

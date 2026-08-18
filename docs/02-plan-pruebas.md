@@ -55,14 +55,15 @@ Cada fase tiene dos verificaciones: **manual** (lo que tú ves y tocas) y **auto
 
 ## Fase 3 — Lazo cerrado (portero)
 
-**Se construye:** policy module + órdenes de trabajo + verificación cruzada + autonomía gradual.
+**Se construye:** policy module (`services/policy`, ADR-0020) + órdenes de trabajo + verificación cruzada + autonomía gradual.
 
 | Manual | Automática |
 |---|---|
-| Escenario `ec_baja`: agente propone → apruebas por chat → dosifica → EC sube | E2E completo con aserciones en cada eslabón + movimiento financiero generado |
-| Botón de HA pasa por el portero (ves el audit) | Unit: reglas del portero (ventanas, límites, umbrales de confianza) |
-| Intentar acción fuera de rango → portero rechaza con razón | E2E: comando sin `policy_id` jamás llega al actuador |
-| Orden de trabajo manual: "podar módulo 1" llega por chat con instrucciones | E2E: verificación cruzada — dosificar sin que EC suba → alerta crítica |
+| Escenario `ec_baja`: agente propone → apruebas por chat → dosifica → EC sube | E2E completo con aserciones en cada eslabón + movimiento financiero generado: `pnpm --dir e2e ec-baja` (stack vivo + sim `--scenario ec_baja`) |
+| Botón de HA pasa por el portero (ves el audit) | Unit: reglas del portero (ventanas, límites, umbrales de confianza) — `cd services/policy && pnpm test` |
+| Intentar acción fuera de rango → portero rechaza con razón | E2E: comando sin `policy_id` jamás llega al actuador — router lo descarta (unit `cd router && pnpm test` + aserción en `e2e/ec-baja`) |
+| Orden de trabajo manual: "podar módulo 1" llega por chat con instrucciones | E2E: verificación cruzada — dosificar sin que EC suba → alerta crítica `verification_failed` (unit `cd services/watchdog && pnpm test`) |
+| Aprobar/rechazar desde la PWA (botón, cero LLM) | Unit: procedures tRPC `pending.*` — `cd pwa && pnpm test` |
 
 **Criterio de salida:** E2E "EC baja" pasa de punta a punta.
 

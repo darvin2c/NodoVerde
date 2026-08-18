@@ -48,6 +48,10 @@
       "terra-finance": {
         "url": "http://finance:7761/mcp",
         "transport": "streamable-http"
+      },
+      "terra-policy": {
+        "url": "http://policy:7762/mcp",
+        "transport": "streamable-http"
       }
     }
   },

@@ -1,9 +1,9 @@
 // Contract test nivel 2: captura mensajes vivos del broker y los valida
 // contra los schemas de contract/asyncapi.yaml. Uso: pnpm contract [segundos]
-// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1):
-//   - dispositivo (5 seg)  — terra/{hw_id}/{device}/{metric}/reading|event|status|confidence, request
-//   - interno (6 seg)      — terra/{tenant}/{module}/{device}/{metric}/reading|event|status|confidence, request/cmd
-//   - plataforma (4 seg)   — terra/{tenant}/{module}/confidence|health|alert (servicios de dominio DIRECTO, sin hw_id)
+// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.6.0):
+//   - dispositivo (4-5 seg) — terra/{hw_id}/{device}/{metric}/reading|event|status|confidence, request, cmd (Fase 3)
+//   - interno (5-6 seg)     — terra/{tenant}/{module}/{device}/{metric}/reading|event|status|confidence, request/cmd
+//   - plataforma (4 seg)    — terra/{tenant}/{module}/confidence|health|alert (servicios de dominio DIRECTO, sin hw_id)
 import mqtt from "mqtt";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
@@ -22,24 +22,25 @@ for (const [name, schema] of Object.entries<any>(schemas)) {
 }
 
 // topic → schema según kind/estructura, adaptado por nº de segmentos
-// - 4 segmentos = plano plataforma: terra/{tenant}/{module}/confidence|health|alert (Fase 1, no pasa por router)
-// - 5 segmentos = plano dispositivo: terra/{hw_id}/{device}/{metric}/reading|event  o status/confidence, request en parts[3]
-// - 6 segmentos = plano interno:    terra/{tenant}/{module}/{device}/{metric}/reading|event  o request en parts[4]
+// - 4 segmentos = plano plataforma (4) o dispositivo cmd (Fase 3: terra/{hw}/{device}/cmd)
+// - 5 segmentos = plano dispositivo (5) o interno cmd (Fase 3: terra/{tenant}/{module}/{device}/cmd)
+// - 6 segmentos = plano interno (6)
 function schemaFor(topic: string): string | null {
   const parts = topic.split("/");
   if (parts[0] === "homeassistant") return null; // discovery HA: lo publica el router, no el fierro
-  // plano plataforma — 4 segmentos (Fase 1 "Cerebro observador")
+  // plano plataforma — 4 segmentos, o dispositivo cmd 4-seg
   if (parts.length === 4) {
+    if (parts[3] === "cmd") return "Cmd"; // Fase 3 dispositivo
     const kind = parts[3];
     if (kind === "confidence") return "Confidence";
     if (kind === "health") return "Health";
     if (kind === "alert") return "Alert";
     return null;
   }
-  // plano dispositivo — 5 segmentos
+  // plano dispositivo — 5 segmentos (o interno cmd 5-seg)
   if (parts.length === 5) {
     if (parts[3] === "request") return "Request";
-    if (parts[3] === "cmd" || parts[4] === "cmd") return "Cmd";
+    if (parts[4] === "cmd" || parts[3] === "cmd") return "Cmd";
     const kind = parts[4];
     if (kind === "reading") return "Reading";
     if (kind === "event") return "Event";
@@ -74,8 +75,14 @@ function schemaFor(topic: string): string | null {
 function planoFor(topic: string): "plataforma" | "dispositivo" | "interno" | "otro" {
   const parts = topic.split("/");
   if (parts[0] !== "terra") return "otro";
-  if (parts.length === 4) return "plataforma";
-  if (parts.length === 5) return "dispositivo";
+  if (parts.length === 4) {
+    if (parts[3] === "cmd") return "dispositivo"; // Fase 3 device cmd
+    return "plataforma";
+  }
+  if (parts.length === 5) {
+    if (parts[4] === "cmd") return "interno"; // Fase 3 internal cmd
+    return "dispositivo";
+  }
   if (parts.length === 6) return "interno";
   if (parts.length === 7) return "interno";
   return "otro";
@@ -91,11 +98,14 @@ client.on("connect", () => {
     console.log(`[contract] capturando ${seconds}s desde ${brokerUrl}...`);
   });
 });
-// ejercicio activo: a los 5s dispara un set como lo haría el producto (plano interno
-// → router → plano dispositivo) — garantiza que el schema Event se valide de verdad
+// ejercicio activo Fase 3: a los ~5s publica cmd interno con policy_id al actuador
+// (terra/demo/mod-1/doser-a-01/cmd) — el router lo traduce a plano dispositivo
+// SOLO si policy_id no vacío (sin portero jamás llega al fierro). Documenta que
+// cmd con policy_id lo traduce el router sin portero (defensa en profundidad en el fierro).
 setTimeout(() => {
-  client.publish("terra/demo/mod-1/doser-a-01/request/set", "ON", { qos: 1 });
-  console.log("[contract] ejercicio activo: set doser-a-01 ON en mod-1");
+  const payload = JSON.stringify({ action: "start", policy_id: "pol-contract-check", params: { duration_ms: 1000 } });
+  client.publish("terra/demo/mod-1/doser-a-01/cmd", payload, { qos: 1 });
+  console.log("[contract] ejercicio activo: cmd start doser-a-01 (policy pol-contract-check) en mod-1");
 }, 5000);
 client.on("message", (topic, payload) => {
   const schemaName = schemaFor(topic);
@@ -133,6 +143,5 @@ setTimeout(() => {
     for (const e of errors.slice(0, 20)) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.5.0");
-  process.exit(0);
+  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.6.0");
 }, seconds * 1000);

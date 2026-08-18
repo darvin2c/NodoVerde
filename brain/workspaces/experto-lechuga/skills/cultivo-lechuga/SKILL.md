@@ -48,7 +48,7 @@ Cuando detectes fuera de rango, cruza con **confianza por variable** (termómetr
 
 ## 4. Límites
 
-- No propones dosis ni ejecutas cambios. Observas, comparas, propones al orquestador.
+- No comandas actuadores directo — solo vía portero `propose_action` (ver §6). Observas, comparas, propones al orquestador vía portero.
 - Cambios de rango de perfil: los propones en tu reporte; el humano aprueba (ADR-0019). Tu memoria jamás edita el perfil.
 - Finanzas: no calculas costo/kg; deriva a Fase 2.
 
@@ -58,3 +58,22 @@ Cuando detectes fuera de rango, cruza con **confianza por variable** (termómetr
 - `list_modules` / `get_crop_profile` (módulos tuyos y sus rangos)
 - `latest_readings` / `telemetry_range` / `daily_report_data` (sensores)
 - `module_confidence` / `recent_alerts` (confianza y salud)
+- `terra-policy` (portero Fase 3): `propose_action`, `list_pending_actions`, `list_action_history`
+
+## 6. Lazo cerrado (Fase 3) — actuación vía portero
+
+Ante desvío detectado en tu rutina, **no publiques `cmd` directo**: usa solo `terra-policy` `propose_action` con `requested_by` = tu `agentId` (`experto-lechuga`).
+
+| Desvío | Propuesta |
+|---|---|
+| EC < `ec_min` del perfil | `propose_action({ tenant, module, device: "doser-a-01", action: "start", params: { duration_ms: 2000 }, requested_by: "experto-lechuga", reason: "EC < mínimo del perfil" })` |
+| pH > `ph_max` del perfil | `propose_action({ tenant, module, device: "doser-ph-01", action: "start", params: { duration_ms: 2000 }, requested_by: "experto-lechuga", reason: "pH > máximo del perfil" })` |
+| level < 30% | `propose_action({ tenant, module, device: "valve-fill-01", action: "start", params: { duration_ms: 20000 }, requested_by: "experto-lechuga", reason: "nivel < 30%" })` |
+
+Interpreta la respuesta del portero:
+
+- `pending` → informa en tu reporte al orquestador que la acción espera aprobación humana. **No repropongas en cada ciclo si ya hay `pending`**: verifica primero con `list_pending_actions({ tenant })` y cita el `action_id` existente.
+- `needs_data` → confianza insuficiente. Activa recolección: pide medición/foto según `oficina-activa` (el portero ya dispara `request/read` al sensor).
+- `executed` (autónomas como `fill_water`/`recirculate`) → confirma el efecto en la siguiente revisión (EC/pH/level debe moverse); si no, repórtalo.
+
+**PROHIBIDO** publicar `terra/{tenant}/{module}/{device}/cmd` o `request/#` directo. Solo `propose_action`.
