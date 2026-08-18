@@ -1,6 +1,8 @@
 # --- Secretos ---
 .env
 *.local
+# generado por brain/setup.sh — contiene token real de hooks
+brain/openclaw.json
 
 # --- Dependencias ---
 node_modules/
@@ -17,3 +19,9 @@ homeassistant/config/
 # --- Runtime / logs ---
 *.log
 .DS_Store
+
+# --- Builds ---
+dist/
+dist-server/
+# Estado runtime que OpenClaw escribe en los workspaces (bootstrap/sesiones)
+brain/workspaces/*/openclaw-workspace-state.json

@@ -42,7 +42,7 @@ export type ModuleState = {
 
 export type SimParams = {
   ecConsumptionPeak: number; // mS/cm per hour at peak radiation
-  ecDoserADelta: number; // per pulse
+  ecDoserADelta: number; // per pulse (pulso estándar 2000ms)
   ecDoserBDelta: number;
   ecEvapCoeff: number; // mS/cm per hour per (100-level)/100
   phDriftPerHour: number;
@@ -51,8 +51,8 @@ export type SimParams = {
   valveFillRate: number; // % per second sim
   waterTauSec: number; // 7200
   mixTauSec: number; // mezcla de dosis en el tanque (600 = 10min)
+  doserMlPerSecond: number; // ml/s de la bomba peristáltica (típica 1.5)
 };
-
 export const DEFAULT_PARAMS: SimParams = {
   ecConsumptionPeak: 0.018,
   ecDoserADelta: 0.12,
@@ -64,6 +64,7 @@ export const DEFAULT_PARAMS: SimParams = {
   valveFillRate: 5.0, // %/s
   waterTauSec: 7200,
   mixTauSec: 600,
+  doserMlPerSecond: 1.5,
 };
 
 export function createInitialModule(id: string, crop: string, ecTarget: [number, number]): ModuleState {

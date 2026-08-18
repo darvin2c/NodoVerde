@@ -10,6 +10,9 @@ const FincaSchema = z.object({
     lat: z.number(),
     lon: z.number(),
     name: z.string(),
+    // IANA (ej: America/Lima) — se provisiona a tenants.tz; los reportes del
+    // cerebro viven en la hora local de la finca, no del servidor.
+    tz: z.string().min(1),
   }),
   tank_liters: z.number().positive(),
   modules: z.array(
@@ -51,13 +54,13 @@ export function loadFinca(yamlPath?: string): FincaConfig {
   if (!p) {
     p =
       findFile([
-        "sim/fincas/demo.yaml", // cwd = repo root
-        "fincas/demo.yaml", // cwd = sim/
-        "../fincas/demo.yaml", // relativo a src/
+        "sim/farms/demo.yaml", // cwd = repo root
+        "farms/demo.yaml", // cwd = sim/
+        "../farms/demo.yaml", // relativo a src/
       ]) ?? undefined;
   }
   if (!p || !existsSync(p)) {
-    throw new Error(`finca yaml not found: ${p ?? "sim/fincas/demo.yaml"}`);
+    throw new Error(`finca yaml not found: ${p ?? "sim/farms/demo.yaml"}`);
   }
   const raw = readFileSync(p, "utf-8");
   const parsed = parseYaml(raw);

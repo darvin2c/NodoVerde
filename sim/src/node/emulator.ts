@@ -62,9 +62,13 @@ type PhysicsState = {
   cropTargets: CropTargets;
   disableAutoDose: boolean;
   deadDevices: string[];
-  offs?: { device: string; ts: number }[];
+  offs?: { device: string; ts: number; durationMs: number }[];
+  doserMlPerSecond?: number;
 };
 
+function mlForDuration(durationMs: number, doserMlPerSecond: number): number {
+  return Math.round((durationMs / 1000) * doserMlPerSecond * 100) / 100;
+}
 async function fetchState(): Promise<PhysicsState | null> {
   try {
     const res = await fetch(`${physicsUrl}/api/nodes/${hwId}/state`);
@@ -75,18 +79,17 @@ async function fetchState(): Promise<PhysicsState | null> {
   }
 }
 
-async function actuate(device: string, command: string): Promise<void> {
+async function actuate(device: string, command: string, durationMs?: number): Promise<void> {
   try {
     await fetch(`${physicsUrl}/api/nodes/${hwId}/actuate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ device, command }),
+      body: JSON.stringify(durationMs !== undefined ? { device, command, durationMs } : { device, command }),
     });
   } catch (e) {
     console.error(`[node ${hwId}] actuate falló (¿física caída?):`, e);
   }
 }
-
 // --- MQTT setup: cliente principal + un cliente LWT por dispositivo ---
 const devices = [...SENSOR_DEVICES, ...SWITCH_DEVICES];
 let client: mqtt.MqttClient | null = null;
@@ -223,10 +226,17 @@ const interval = setInterval(async () => {
   // auto-dosis: protección de cultivo del firmware (una acción por ciclo)
   const action = decideAutoDose(st.state, st.cropTargets, st.disableAutoDose, sensorRng);
   if (action) {
-    await actuate(action.device, "ON");
+    await actuate(action.device, "ON", action.durationMs);
     const metric = action.device === "valve-fill-01" ? "level" : action.device === "doser-ph-01" ? "ph" : "ec";
-    const detail: Record<string, unknown> =
-      action.event === "auto_dose" ? { ec: st.state.ec } : action.event === "auto_dose_ph" ? { ph: st.state.ph } : { level: st.state.tankLevel };
+    const rate = st.doserMlPerSecond ?? 1.5;
+    let detail: Record<string, unknown>;
+    if (action.event === "auto_dose") {
+      detail = { ec: st.state.ec, duration_ms: action.durationMs, ml: mlForDuration(action.durationMs, rate) };
+    } else if (action.event === "auto_dose_ph") {
+      detail = { ph: st.state.ph, duration_ms: action.durationMs, ml: mlForDuration(action.durationMs, rate) };
+    } else {
+      detail = { level: st.state.tankLevel };
+    }
     if (client) await publish(client, eventTopic(hwId, action.device, metric), buildEvent(action.event, nowSim, detail));
   }
 
@@ -260,10 +270,14 @@ const interval = setInterval(async () => {
   for (const off of st.offs ?? []) {
     if ((offsSeen.get(off.device) ?? -1) < off.ts && client && OFF_EVENTS[off.device] && !st.deadDevices.includes(off.device)) {
       offsSeen.set(off.device, off.ts);
-      await publish(client, eventTopic(hwId, off.device, OFF_EVENTS[off.device].metric), buildEvent(OFF_EVENTS[off.device].name, off.ts, { device: off.device }));
+      const rate = st.doserMlPerSecond ?? 1.5;
+      const durationMs = off.durationMs ?? 2000;
+      const detail: Record<string, unknown> = { device: off.device, duration_ms: durationMs };
+      // ml solo para dosificadores (valve-fill no dosifica)
+      if (off.device.startsWith("doser-")) detail.ml = mlForDuration(durationMs, rate);
+      await publish(client, eventTopic(hwId, off.device, OFF_EVENTS[off.device].metric), buildEvent(OFF_EVENTS[off.device].name, off.ts, detail));
     }
   }
-
   if (nowSim - lastReadingSimMs >= 30_000) {
     lastReadingSimMs = nowSim;
     if (!client) return;
@@ -298,7 +312,10 @@ const interval = setInterval(async () => {
   }
 }, 1000);
 
+let shuttingDown = false;
 async function shutdown(signal: string) {
+  if (shuttingDown) return; // mismo grupo que el supervisor: SIGINT llega por ambas vías
+  shuttingDown = true;
   console.log(`[node ${hwId}] ${signal} shutdown`);
   clearInterval(interval);
   if (client) {

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://docs.openclaw.ai/schemas/config.json",
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspaces/main",
+      "subagents": {
+        "allowAgents": ["experto-lechuga", "experto-tomate"]
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "default": true,
+        "identity": { "name": "Orquestador terraOS" }
+      },
+      {
+        "id": "experto-lechuga",
+        "name": "Experto Lechuga",
+        "workspace": "/home/node/.openclaw/workspaces/experto-lechuga",
+        "skills": ["cultivo-lechuga"],
+        "tools": {
+          "deny": ["message", "exec", "process", "browser", "gateway", "sessions_spawn", "apply_patch"]
+        }
+      },
+      {
+        "id": "experto-tomate",
+        "name": "Experto Tomate",
+        "workspace": "/home/node/.openclaw/workspaces/experto-tomate",
+        "skills": ["cultivo-tomate"],
+        "tools": {
+          "deny": ["message", "exec", "process", "browser", "gateway", "sessions_spawn", "apply_patch"]
+        }
+      }
+    ]
+  },
+  "hooks": {
+    "enabled": true,
+    "path": "/hooks",
+    "token": "${OPENCLAW_HOOK_TOKEN}",
+    "allowedAgentIds": ["main", "experto-lechuga", "experto-tomate"]
+  },
+  "mcp": {
+    "servers": {
+      "terra-domain": {
+        "url": "http://mcp-domain:7760/mcp",
+        "transport": "streamable-http"
+      },
+      "terra-finance": {
+        "url": "http://finance:7761/mcp",
+        "transport": "streamable-http"
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": {
+        "source": "env",
+        "provider": "default",
+        "id": "OPENCLAW_GATEWAY_TOKEN"
+      }
+    }
+  }
+}

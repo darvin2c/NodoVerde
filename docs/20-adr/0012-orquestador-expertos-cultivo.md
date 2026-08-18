@@ -4,7 +4,7 @@ title: "ADR-0012: Arquitectura multi-agente — orquestador + expertos por culti
 description: Un gateway OpenClaw; agente orquestador único dueño del canal al portero; expertos por cultivo con skill y memoria propia que aprenden por ciclo cerrado
 tags: [adr, multi-agente, openclaw, memoria, aprendizaje]
 created: 2026-08-15
-status: aceptado
+status: aceptado (supersede parcial por ADR-0019: los expertos hablan directo con el portero — el orquestador ya no es el único canal — y entran en Fase 1, no en Fase 3-4; el resto del modelo orquestador+expertos se mantiene)
 amplia: ADR-0001
 ---
 

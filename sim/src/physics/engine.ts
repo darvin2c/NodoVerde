@@ -129,7 +129,19 @@ const TIMER_DEVICES: [keyof ModuleState, string][] = [
   ["doserPhTimer", "doser-ph-01"],
   ["valveTimer", "valve-fill-01"],
 ];
-const offLog = new Map<string, { device: string; ts: number }[]>();
+const offLog = new Map<string, { device: string; ts: number; durationMs: number }[]>();
+// duración original del pulso que expiró (para calcular ml determinístico)
+const pendingDurations = new Map<string, Map<string, number>>();
+function setPendingDuration(hwId: string, device: string, durationMs: number) {
+  let m = pendingDurations.get(hwId);
+  if (!m) { m = new Map(); pendingDurations.set(hwId, m); }
+  m.set(device, durationMs);
+}
+function takePendingDuration(hwId: string, device: string, fallbackMs: number): number {
+  const m = pendingDurations.get(hwId);
+  if (m?.has(device)) { const v = m.get(device)!; m.delete(device); return v; }
+  return fallbackMs;
+}
 const interval = setInterval(() => {
   const dtRealMs = 1000;
   const dtSimSec = simClock.dtSimSec(dtRealMs);
@@ -155,7 +167,8 @@ const interval = setInterval(() => {
       for (const [timer, device] of TIMER_DEVICES) {
         if ((prev[timer] as number) > 0 && (modules[idx][timer] as number) === 0) {
           const log = offLog.get(prev.id) ?? [];
-          log.push({ device, ts: stepSimMs + subDt * 1000 });
+          const durationMs = takePendingDuration(prev.id, device, 2000);
+          log.push({ device, ts: stepSimMs + subDt * 1000, durationMs });
           if (log.length > 100) log.shift();
           offLog.set(prev.id, log);
         }
@@ -170,16 +183,26 @@ const interval = setInterval(() => {
 }, 1000);
 
 // --- actuación: la ÚNICA forma de cambiar el mundo (equivalente a mover un pin) ---
-function actuate(hwId: string, device: string, cmd: string): ModuleState | null {
+function actuate(hwId: string, device: string, cmd: string, durationMs?: number): ModuleState | null {
   const idx = modules.findIndex((m) => m.id === hwId);
   if (idx === -1) return null;
   const mod = modules[idx];
   if (cmd === "ON") {
-    if (device === "pump-recirc-01") mod.pumpOn = true;
-    if (device === "valve-fill-01") modules[idx] = triggerValve(mod, 2000);
-    if (device === "doser-a-01") modules[idx] = triggerDoserA(mod, 2000);
-    if (device === "doser-b-01") modules[idx] = triggerDoserB(mod, 2000);
-    if (device === "doser-ph-01") modules[idx] = triggerDoserPh(mod, 2000);
+    const dur = durationMs ?? 2000;
+    if (device === "pump-recirc-01") { mod.pumpOn = true; }
+    else if (device === "valve-fill-01") {
+      const next = triggerValve(mod, dur);
+      if (next !== mod) { modules[idx] = next; setPendingDuration(hwId, device, dur); }
+    } else if (device === "doser-a-01") {
+      const next = triggerDoserA(mod, dur);
+      if (next !== mod) { modules[idx] = next; setPendingDuration(hwId, device, dur); }
+    } else if (device === "doser-b-01") {
+      const next = triggerDoserB(mod, dur);
+      if (next !== mod) { modules[idx] = next; setPendingDuration(hwId, device, dur); }
+    } else if (device === "doser-ph-01") {
+      const next = triggerDoserPh(mod, dur);
+      if (next !== mod) { modules[idx] = next; setPendingDuration(hwId, device, dur); }
+    }
   } else if (cmd === "OFF") {
     if (device === "pump-recirc-01") mod.pumpOn = false;
     if (device.includes("doser") || device.includes("valve")) {
@@ -187,11 +210,12 @@ function actuate(hwId: string, device: string, cmd: string): ModuleState | null 
       mod.doserBTimer = 0;
       mod.doserPhTimer = 0;
       mod.valveTimer = 0;
+      const m = pendingDurations.get(hwId);
+      if (m) m.delete(device);
     }
   }
   return modules[idx];
 }
-
 function nodeState(hwId: string): Record<string, unknown> | null {
   const mod = modules.find((m) => m.id === hwId);
   if (!mod) return null;
@@ -214,9 +238,9 @@ function nodeState(hwId: string): Record<string, unknown> | null {
     disableAutoDose: scenario.disable_auto_dose ?? false,
     deadDevices: faults,
     offs: (offLog.get(hwId) ?? []).slice(-20),
+    doserMlPerSecond: DEFAULT_PARAMS.doserMlPerSecond,
   };
 }
-
 function addNode(hwId: string, crop: string): Record<string, unknown> {
   if (!/^[0-9a-f]{12}$/.test(hwId)) throw new Error(`hw_id inválido: ${hwId}`);
   if (modules.some((m) => m.id === hwId)) throw new Error(`nodo ya existe: ${hwId}`);
@@ -235,6 +259,7 @@ function removeNode(hwId: string): boolean {
   if (idx === -1) return false;
   modules.splice(idx, 1);
   offLog.delete(hwId);
+  pendingDurations.delete(hwId);
   return true;
 }
 
@@ -306,8 +331,8 @@ const server = createServer((req, res) => {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       try {
-        const { device, command } = JSON.parse(body);
-        const st = actuate(nodeMatch[1], device, command);
+        const { device, command, durationMs } = JSON.parse(body) as { device: string; command: string; durationMs?: number };
+        const st = actuate(nodeMatch[1], device, command, typeof durationMs === "number" ? durationMs : undefined);
         if (!st) return send(404, { error: "nodo desconocido" });
         send(200, { ok: true, state: st });
       } catch (e) {

@@ -13,9 +13,10 @@
 # modules: lista de nodos físicos; cada hw_id es un dispositivo tonto (sin identidad)
 tenant: demo # slug finca — metadato local, NO en MQTT (ADR-0015)
 location: # ubicación para ET0 y dashboards
-  lat: -6.7 # latitud Lambayeque
-  lon: -79.9 # longitud Lambayeque
-  name: Lambayeque # nombre humano de la zona
+  lat: -6.486 # latitud Lambayeque
+  lon: -79.647 # longitud Lambayeque
+  name: Lambayeque, Perú # nombre humano de la zona
+  tz: America/Lima # IANA — se provisiona a tenants.tz (reportes en hora local)
 tank_liters: 200 # litros por tanque de módulo
 modules: # 4 nodos del piloto Fase 0 (hw_ids determinísticos)
   - hw_id: "020000000001" # nodo 1

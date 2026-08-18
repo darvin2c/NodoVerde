@@ -18,7 +18,7 @@ CAMPO (simulado hoy, hardware mañana)  →  CEREBRO  →  PORTERO  →  CAMPO
 ```
 
 1. **El campo** — hoy un simulador con física real (FAO-56); mañana hardware real. Publica por MQTT y todo queda en la base de datos.
-2. **El cerebro** — OpenClaw. Lee datos, mira fotos, decide, reporta por WhatsApp, lleva las cuentas.
+2. **El cerebro** — OpenClaw multi-agente (ADR-0019): un **orquestador** (única voz al humano, único que hablará con el portero) + un **agente experto por especie** (memoria y playbook propios; proponen, nunca ejecutan). Lee datos, mira fotos, reporta por WhatsApp/Telegram, llevará las cuentas (Fase 2).
 3. **El portero** — policy module. Toda orden a actuador pasa por él: valida límites, pide aprobación, deja registro.
 4. **Tú** — WhatsApp/Telegram. Reportes, fotos, aprobaciones. Esa es toda la interfaz.
 
@@ -39,7 +39,7 @@ flowchart LR
         DB[(Postgres + TimescaleDB<br/>telemetría + dominio + ledger)]
         OBJ[(MinIO: fotos)]
         HA[Home Assistant: interfaz visual<br/>botones → solicitudes, nunca comandos]
-        BRAIN[Cerebro: OpenClaw + policy-module interno<br/>+ bridge MQTT↔OpenClaw]
+        BRAIN[Cerebro: OpenClaw multi-agente (ADR-0019)<br/>orquestador + expertos por especie<br/>+ bridge MQTT↔OpenClaw]
         GRAF[Grafana: análisis + alertas de umbral]
         WD[Watchdog: salud dispositivos<br/>+ verificación cruzada]
     end
@@ -84,10 +84,11 @@ Toda función tiene exactamente un dueño. Quien no es dueño, tiene prohibido e
 | Órdenes de trabajo manuales | **Policy module** las emite, **chat** las entrega (ADR-0010) | Comandos MQTT a humanos |
 | IoT hub / integraciones | **Home Assistant** (ADR-0008) | openHAB, Gladys (descartados) |
 | Cerebro | **OpenClaw** | Hermes (descartado como pieza; su learning loop va al backlog) |
-| Propuestas agronómicas por cultivo | **Agente experto del cultivo** (skill + memoria propia, ADR-0012) | El orquestador improvisando agronomía |
+| Propuestas agronómicas por cultivo | **Agente experto de la especie** (workspace + memoria + playbook propios, ADR-0019) | El orquestador improvisando agronomía |
 | Canal hacia el portero | **Agente orquestador** (único) | Expertos hablando directo al portero (prohibido) |
 | Cambios a perfiles de cultivo | **Humano aprueba** (experto solo propone) | Auto-edición de perfiles por el agente |
-
+| Ledger financiero (`movements`) | **MCP terra-finance** (`services/finance`, dueño único de escritura; `voided_by`/`anula_a` + filtro vigente `voided_by IS NULL AND anula_a IS NULL`) | Cualquier otro escritor (mcp-domain, PWA, agente directo a DB) |
+| Lecturas de telemetría | **MCP terra-domain** (read-only) + **Telegraf** (ingesta) | Escritura de telemetría por otros servicios |
 ## Flujo de una decisión (lazo cerrado)
 
 1. Simulador/edge publica telemetría → MQTT → Telegraf → TimescaleDB.

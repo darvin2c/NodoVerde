@@ -14,23 +14,30 @@ terraOS: agente autónomo de gestión agrícola integral (financiero + operacion
 6. **Tablas del agente** — solo con prefijo `agent_*`; jamás duplicando movimientos financieros.
 7. **Conocimiento honesto (ADR-0010)** — ausencia de dato ≠ dato cero. El agente declara lo que no sabe; la confianza la calcula código determinístico, nunca el LLM.
 8. **Historia financiera inmutable (ADR-0011)** — nada se borra ni se edita; corrección = anulación + nuevo movimiento. Todo movimiento se imputa a cultivo(s) con porcentajes que suman 100%.
-9. **Solo el orquestador habla con el portero (ADR-0012)** — los expertos por cultivo proponen; nunca ejecutan ni emiten comandos. Los perfiles de cultivo solo cambian con aprobación humana.
+9. **Expertos hablan con el portero directo (ADR-0019)** — la validación dura vive en la herramienta de actuación (código), jamás en una skill; los expertos nunca publican `cmd/` directamente ni tienen message tool. El orquestador es la única voz al humano. Los perfiles de cultivo solo cambian con aprobación humana.
 
-## Cómo correr (Fase 0)
+## Cómo correr (Fase 1)
 
 ```bash
 cp .env.example .env
-docker compose up -d --wait              # mosquitto, timescale, telegraf, grafana, minio, HA
+./brain/setup.sh                          # genera brain/openclaw.json (token hooks) desde template
+docker compose up -d --wait              # data plane + watchdog + confidence + mcp-domain + finance + bridge + pwa (+ openclaw si hay API key)
+docker compose up -d openclaw            # cerebro: imagen oficial ghcr pineada (ADR-0018), sin build
+./brain/automations.sh                   # automations de agentes (ADR-0019; --channel <C> --to <D> añade reporte diario)
 cd router && pnpm install && pnpm dev    # router de identidad (ADR-0015) — traduce plano dispositivo ↔ interno
 cd sim && pnpm install && pnpm dev       # mundo simulado (ADR-0017): física + un emulador por hw_id
 # flags del sim: --speed N --seed S --offline --scenario normal|ec_baja|sensor_muerto --start <iso>
 # laboratorio: pnpm ctl list | add-node --crop X [--hw H] | remove-node --hw H [--unclaim] | scenario <nombre>
 ```
 
-- HA: http://localhost:8124 (el 8123 del host lo ocupa TerraSmart). Primera vez: onboarding + Settings → Add Integration → MQTT → broker `mosquitto:1883` (HA moderno NO acepta broker en YAML).
-- Grafana: http://localhost:3001 (admin/admin), dashboard "Terra Overview" provisionado.
+- HA: http://localhost:8124 (el 8123 del host lo ocupa TerraSmart). Primera vez: onboarding + Settings → Add Integration → MQTT → broker `mosquitto:1883` (HA moderno NO acepta broker en YAML). Incluye gauges de confianza y salud por módulo (discovery del router, contrato v0.5.0).
+- Grafana: http://localhost:3001 (admin/admin), dashboard "Terra Overview" + alertas de umbral (EC/pH/nivel) provisionadas.
+- MCP dominio (read-only): http://localhost:7760/mcp — herramientas del cerebro (`daily_report_data`, `latest_readings`, …).
+- Finanzas (read+write): http://localhost:7761/mcp — ledger `movements` (`register_movement`, `void_movement`, `list_movements`, `cost_summary`, `list_supplies`, `set_supply_cost`).
+- Cerebro (OpenClaw): gateway en :18789. Reporte diario por el canal que elijas (Telegram/WhatsApp/WebChat) — ver `brain/README.md`. Sin `TELEGRAM_BOT_TOKEN` el canal queda inactivo; el resto funciona igual.
 - Laboratorio (monitor del simulador, Node-RED): http://localhost:1880/dashboard/lab — verdad física vs. publicado, enchufar/desenchufar nodos. Editor: http://localhost:1880.
-- Verificación automática: `cd sim && pnpm test` (unit) y `pnpm contract` (mensajes vivos vs AsyncAPI v0.4.0); `cd router && pnpm test`.
+- Verificación automática: `pnpm test` en `sim/`, `router/`, `services/watchdog/`, `services/confidence/`, `services/bridge/`, `services/mcp-domain/`, `services/finance/`, `pwa/`; `cd sim && pnpm contract` (mensajes vivos vs AsyncAPI v0.5.0, incluye plano plataforma 4-seg).
+- Migración DB para volúmenes existentes (idempotentes; `init.sql` ya cubre volúmenes nuevos): `for m in infra/db/migrations/*.sql; do docker exec -i terra-timescale psql -U terra -d terra < $m; done`
 
 ## Stack
 
