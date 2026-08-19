@@ -18,7 +18,7 @@ CAMPO (simulado hoy, hardware mañana)  →  CEREBRO  →  PORTERO  →  CAMPO
 ```
 
 1. **El campo** — hoy un simulador con física real (FAO-56); mañana hardware real. Publica por MQTT y todo queda en la base de datos.
-2. **El cerebro** — OpenClaw multi-agente (ADR-0019): un **orquestador** (única voz al humano, único que hablará con el portero) + un **agente experto por especie** (memoria y playbook propios; proponen, nunca ejecutan). Lee datos, mira fotos, reporta por WhatsApp/Telegram, llevará las cuentas (Fase 2).
+2. **El cerebro** — OpenClaw multi-agente (ADR-0019): un **orquestador** (única voz al humano) + un **agente experto por especie** (memoria y playbook propios; hablan directo con el portero, que los valida como a cualquier solicitante). Lee datos, mira fotos, reporta por WhatsApp/Telegram, llevará las cuentas (Fase 2).
 3. **El portero** — policy module. Toda orden a actuador pasa por él: valida límites, pide aprobación, deja registro.
 4. **Tú** — WhatsApp/Telegram. Reportes, fotos, aprobaciones. Esa es toda la interfaz.
 
@@ -85,10 +85,14 @@ Toda función tiene exactamente un dueño. Quien no es dueño, tiene prohibido e
 | IoT hub / integraciones | **Home Assistant** (ADR-0008) | openHAB, Gladys (descartados) |
 | Cerebro | **OpenClaw** | Hermes (descartado como pieza; su learning loop va al backlog) |
 | Propuestas agronómicas por cultivo | **Agente experto de la especie** (workspace + memoria + playbook propios, ADR-0019) | El orquestador improvisando agronomía |
-| Canal hacia el portero | **Agente orquestador** (único) | Expertos hablando directo al portero (prohibido) |
+| Canal hacia el portero | **Cualquier agente validado** (expertos directo, ADR-0019; la validación dura vive en el portero) | Publicar `cmd/` por fuera del portero; orquestador reenviando propuestas (mensajería LLM innecesaria) |
 | Cambios a perfiles de cultivo | **Humano aprueba** (experto solo propone) | Auto-edición de perfiles por el agente |
 | Ledger financiero (`movements`) | **MCP terra-finance** (`services/finance`, dueño único de escritura; `voided_by`/`anula_a` + filtro vigente `voided_by IS NULL AND anula_a IS NULL`) | Cualquier otro escritor (mcp-domain, PWA, agente directo a DB) |
 | Lecturas de telemetría | **MCP terra-domain** (read-only) + **Telegraf** (ingesta) | Escritura de telemetría por otros servicios |
+| Invariante financiera de campaña (imputación 100%) | **finance** (valida su propio ledger y publica al topic `alert`, ADR-0021) | Watchdog u otro servicio conociendo reglas del ledger |
+| Invariante de actuación (cero cmd sin policy) | **router** (único que ve el descarte; publica `cmd_sin_policy`, ADR-0021) | Inferencia externa desde logs |
+| Invariante de presupuesto de tokens | **Cron de tokens** (lee usage del gateway, calcula USD en código, registra en ledger, ADR-0021) | El LLM calculando o reportando su propio gasto |
+| Registro de campaña (perfil + memoria por ciclo) | **MCP terra-domain** (tabla `campaigns`, `open/close_campaign`, hashes en código, ADR-0021) | Markdown del agente como registro primario |
 ## Flujo de una decisión (lazo cerrado)
 
 1. Simulador/edge publica telemetría → MQTT → Telegraf → TimescaleDB.

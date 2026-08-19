@@ -241,6 +241,10 @@ services:
     environment:
       MCP_DOMAIN_PORT: "7760"
       DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      # Fase 4 (ADR-0021): memory_hash de campañas = sha256 del MEMORY.md del experto
+      WORKSPACES_PATH: /workspaces
+    volumes:
+      - ./brain/workspaces:/workspaces:ro
     depends_on:
       timescale:
         condition: service_healthy
@@ -321,6 +325,35 @@ services:
         condition: service_healthy
       timescale:
         condition: service_healthy
+
+  # Token-meter (Fase 4, ADR-0021 §4): contabilidad determinística de tokens del cerebro.
+  # Lee sesiones JSONL de OpenClaw (ro), calcula USD con tabla de precios propia (código,
+  # cero LLM), registra movimiento diario categoría software en el ledger vía MCP finance
+  # y alerta budget_tokens si el mes supera el techo. Sin TOKEN_PRICE_TABLE no registra
+  # (alerta unknown_model — jamás fabrica costos).
+  token-meter:
+    build: ./services/token-meter
+    container_name: terra-token-meter
+    restart: unless-stopped
+    networks: [terra]
+    environment:
+      MQTT_URL: mqtt://mosquitto:1883
+      DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      FINANCE_MCP_URL: http://finance:7761/mcp
+      OPENCLAW_STATE_PATH: /openclaw
+      TENANT: ${TENANT:-demo}
+      TOKEN_PRICE_TABLE: ${TOKEN_PRICE_TABLE:-}
+      TOKEN_BUDGET_USD_MONTHLY: ${TOKEN_BUDGET_USD_MONTHLY:-50}
+      SETTLE_INTERVAL_HOURS: ${SETTLE_INTERVAL_HOURS:-24}
+    volumes:
+      - openclaw_state:/openclaw:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      timescale:
+        condition: service_healthy
+      finance:
+        condition: service_started
 
   # PWA terraOS — portada read-only (ADR-0014). tRPC server sirve API + frontend compilado.
   pwa:

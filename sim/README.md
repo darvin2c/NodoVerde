@@ -123,11 +123,24 @@ LWT se refleja en ambos planos (`terra/{hw_id}/...` y, vía router, `terra/{tena
 | `--scenario NAME` | `normal` | Escenario de `scenarios/NAME.yaml`. |
 | `--start ISO` | ahora | Época sim inicial fija (tests reproducibles). |
 
+| Env | Default | Efecto |
+|---|---|---|
+| `CATCHUP_MIN_SIM_MS` | `300000` (5 min sim) | Umbral mínimo de hueco simulado para disparar catch-up al arrancar. |
+| `CATCHUP_MAX_STEPS` | `604800` (7 días sim a 1 s/paso) | Cap de pasos de catch-up; si se trunca se loggea `warn` y se aplica el cap. |
+
+### Reanudación con pausa honesta (ADR-0021)
+
+Cada `saveState` persiste `savedAtMs` (reloj real al guardar). Al arrancar, si existe estado persistido con `savedAtMs`:
+
+- `gapSimMs = (Date.now() − savedAtMs) × speed` (el mundo vive la pausa, como una finca real en un corte).
+- Si `gapSimMs > CATCHUP_MIN_SIM_MS`: se integra la física en pasos de **1 s sim** hasta cubrir el hueco (máx `CATCHUP_MAX_STEPS`; si se trunca, log `warn`). El cuerpo del tick está extraído a `physicsStep()` y es reusado por el catch-up.
+- Log: `[physics] catch-up: +Xh sim (apagado Yh reales)` (Xh simulado, Yh reales). Sin `savedAtMs` (estado viejo) → sin catch-up + log informativo.
+- El catch-up corre **antes** de aceptar requests/telemetría nueva (boot sequence), de modo que el primer `ts` publicado ya está resincronizado; la telemetría nace fresca y la confianza se recupera sola sin tocar watchdog/mcp-domain.
+
 Requiere Mosquitto en `MQTT_URL` (default `mqtt://localhost:1883`) — ver `docker-compose.yml` en la raíz.
 La física expone un HTTP de laboratorio en `PHYSICS_PORT` (default `7751`, jamás consumido por el producto)
 y el supervisor un HTTP de control en `SUPERVISOR_PORT` (default `7750`) usado por `pnpm ctl`.
 El sim **no necesita** el router ni la DB para arrancar; `add-node` sí (escribe el claim en `device_identities`).
-
 ## Monitor de laboratorio (Node-RED)
 
 Grafana es el explorador de **datos** y HA el monitor de **dispositivos** — ninguno muestra

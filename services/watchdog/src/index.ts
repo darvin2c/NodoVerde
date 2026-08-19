@@ -8,6 +8,7 @@ import pg from "pg";
 import { parseReadingTopic, parseStatusTopic, parseCmdTopic, buildHealthTopic, buildAlertTopic } from "./topics.js";
 import { DeviceHealthTracker, type ExpectedDevice } from "./health.js";
 import { CrossVerifier } from "./verify.js";
+import { decideGap, parseGapMinMs } from "./dataGap.js";
 
 const { Pool } = pg;
 
@@ -21,12 +22,12 @@ const FROZEN_READINGS = process.env.FROZEN_READINGS ? parseInt(process.env.FROZE
 const BOOT_GRACE_MS = process.env.BOOT_GRACE_MS ? parseInt(process.env.BOOT_GRACE_MS, 10) : 30000;
 const bootedAt = Date.now();
 const VERIFY_WINDOW_MS = process.env.VERIFY_WINDOW_MS ? parseInt(process.env.VERIFY_WINDOW_MS, 10) : 900000;
+const GAP_MIN_MS = parseGapMinMs(process.env.GAP_MIN_MS, 600000);
 
 const READING_SUB = "terra/+/+/+/+/reading";
 const STATUS_SUB = "terra/+/+/+/status/status";
 const CMD_SUB = "terra/+/+/+/cmd";
-
-console.log(`[watchdog] arranque MQTT_URL=${MQTT_URL} SILENCE_AFTER_MS=${SILENCE_AFTER_MS} FROZEN_READINGS=${FROZEN_READINGS} VERIFY_WINDOW_MS=${VERIFY_WINDOW_MS}`);
+console.log(`[watchdog] arranque MQTT_URL=${MQTT_URL} SILENCE_AFTER_MS=${SILENCE_AFTER_MS} FROZEN_READINGS=${FROZEN_READINGS} VERIFY_WINDOW_MS=${VERIFY_WINDOW_MS} BOOT_GRACE_MS=${BOOT_GRACE_MS} GAP_MIN_MS=${GAP_MIN_MS}`);
 
 // ---------------------------------------------------------------------------
 // DB pool
@@ -123,6 +124,65 @@ function publish(topic: string, payload: string, opts: { qos: 0 | 1; retain: boo
   });
   return promise;
 }
+// ---------------------------------------------------------------------------
+// data_gap — una sola vez tras BOOT_GRACE (Fase 4, ADR-0021)
+// ---------------------------------------------------------------------------
+
+async function checkDataGaps(): Promise<void> {
+  const nowMs = Date.now();
+  let tenants: string[];
+  try {
+    const res = await pool.query<{ tenant: string }>("SELECT DISTINCT tenant FROM modules");
+    tenants = res.rows.map((r) => r.tenant).filter((t): t is string => typeof t === "string" && t.length > 0);
+  } catch (err) {
+    console.error("[watchdog] data_gap: error listando tenants", err);
+    return;
+  }
+  if (tenants.length === 0) return;
+  for (const tenant of tenants) {
+    let maxMs: number | null = null;
+    try {
+      const res = await pool.query<{ max: Date | string | null }>("SELECT max(time) AS max FROM telemetry WHERE tenant=$1", [tenant]);
+      const raw = (res.rows[0] as { max: unknown } | undefined)?.max ?? null;
+      if (raw === null || raw === undefined) {
+        continue;
+      }
+      if (raw instanceof Date) {
+        const t = raw.getTime();
+        if (Number.isFinite(t)) maxMs = t;
+        else continue;
+      } else if (typeof raw === "string") {
+        const t = new Date(raw).getTime();
+        if (Number.isFinite(t)) maxMs = t;
+        else continue;
+      } else if (typeof raw === "number" && Number.isFinite(raw)) {
+        maxMs = raw;
+      } else {
+        continue;
+      }
+    } catch (err) {
+      console.error(`[watchdog] data_gap: error consultando telemetry tenant=${tenant}`, err);
+      continue;
+    }
+    const decision = decideGap(maxMs, nowMs, GAP_MIN_MS);
+    if (!decision.shouldAlert) continue;
+    const detail = decision.detail;
+    const alert = {
+      name: "data_gap",
+      ts: nowMs,
+      severity: "warn" as const,
+      detail,
+    };
+    const topic = buildAlertTopic(tenant, "platform");
+    try {
+      await publish(topic, JSON.stringify(alert), { qos: 1, retain: false });
+      console.log(`[watchdog] data_gap tenant=${tenant} from=${detail.from_ms} to=${detail.to_ms} duration_min=${detail.duration_min}`);
+    } catch (err) {
+      console.error(`[watchdog] data_gap: error publicando alert tenant=${tenant}`, err);
+    }
+  }
+}
+
 
 // Último health publicado por módulo para detectar cambios + heartbeat
 const lastHealthJson = new Map<ModuleKey, string>();
@@ -268,6 +328,9 @@ client.on("message", (topic: string, payload: Buffer) => {
 await loadExpectedDevices();
 const refreshInterval = setInterval(() => void loadExpectedDevices(), 60_000);
 
+// data_gap — one-shot tras BOOT_GRACE (Fase 4)
+const dataGapTimeout = setTimeout(() => void checkDataGaps(), BOOT_GRACE_MS);
+
 // Evaluación periódica cada 5s (detecta silence) + heartbeat de health cada 30s
 let lastHeartbeat = Date.now();
 const evalInterval = setInterval(() => {
@@ -308,6 +371,7 @@ async function shutdown(signal: string): Promise<void> {
   console.log(`[watchdog] shutdown ${signal}`);
   clearInterval(refreshInterval);
   clearInterval(evalInterval);
+  clearTimeout(dataGapTimeout);
   try {
     client.end(true);
   } catch {}

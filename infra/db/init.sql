@@ -107,8 +107,7 @@ CREATE TABLE IF NOT EXISTS alerts (
   name TEXT NOT NULL,
   severity TEXT NOT NULL CHECK (severity IN ('info', 'warn', 'critical')),
   device TEXT,
-  detail TEXT, -- JSON serializado (telegraf CopyFrom no escribe jsonb; se parsea al leer)
-  FOREIGN KEY (tenant, module) REFERENCES modules(tenant, id)
+  detail TEXT -- JSON serializado (telegraf CopyFrom no escribe jsonb; se parsea al leer)
 );
 
 SELECT create_hypertable('alerts', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
@@ -420,3 +419,33 @@ DROP TRIGGER IF EXISTS trg_action_requests_transition ON action_requests;
 CREATE TRIGGER trg_action_requests_transition
   BEFORE UPDATE ON action_requests
   FOR EACH ROW EXECUTE FUNCTION enforce_action_request_transition();
+
+
+-- ── Fase 4 "Campaña con pausas honestas" (ADR-0021) ─────────────────────────
+-- alerts ya no tiene FK a modules (module='platform' para alertas de plataforma)
+-- campaigns + alert_resolutions son la única excepción de escritura gobernada en mcp-domain (write.ts)
+CREATE TABLE IF NOT EXISTS campaigns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant TEXT NOT NULL,
+  crop TEXT NOT NULL REFERENCES crop_profiles(name),
+  modules JSONB NOT NULL,
+  profile_hash TEXT NOT NULL,
+  memory_hash TEXT,
+  memory_hash_close TEXT,
+  note TEXT,
+  opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','closed'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS campaigns_one_open_per_tenant ON campaigns (tenant) WHERE state = 'open';
+
+CREATE TABLE IF NOT EXISTS alert_resolutions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant TEXT NOT NULL,
+  alert_name TEXT NOT NULL,
+  module TEXT,
+  fingerprint TEXT,
+  note TEXT,
+  resolved_by TEXT NOT NULL DEFAULT 'human',
+  resolved_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

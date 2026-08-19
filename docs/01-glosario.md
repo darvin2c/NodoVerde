@@ -69,4 +69,4 @@ status: vigente
 | Unitario | Las fórmulas (agua, dinero) | Segundos |
 | Integración | Que las piezas se entiendan entre sí | Minutos |
 | E2E acelerado | Sistema completo, simulación rápida, semilla fija | ~15 min |
-| Campaña 1:1 | El sistema viviendo una temporada en tiempo real | Meses |
+| Campaña 1:1 | El sistema viviendo una temporada en tiempo real (ADR-0021: admite pausas honestas; se mide en días de reloj sim) | Meses |

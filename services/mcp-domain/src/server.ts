@@ -1,5 +1,5 @@
-// src/server.ts — herramientas MCP read-only del dominio
-// Todas leen DB vía queries SELECT y delegan shaping a funciones puras (report.ts).
+// src/server.ts — herramientas MCP de dominio (lectura + campaña gobernada ADR-0021)
+// Telemetría/perfiles siguen read-only (db.ts); campaigns/alert_resolutions usan write.ts (pool separado).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -16,6 +16,16 @@ import {
   confidenceForDateDb,
 } from "./db.js";
 import { buildDailyReportData } from "./report.js";
+import {
+  computeProfileHash,
+  computeMemoryHash,
+  getCurrentCampaignDb,
+  listCampaignsDb,
+  listInvariantAlertsDb,
+  insertCampaignDb,
+  closeCampaignDb,
+  insertResolutionDb,
+} from "./write.js";
 
 function summaryText(obj: unknown, maxLen = 4000): string {
   const s = JSON.stringify(obj, null, 2);
@@ -291,6 +301,181 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text: `${summary}\n${summaryText(data)}` }],
         structuredContent: data as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — open_campaign ----------------------------------------------------------
+  server.registerTool(
+    "open_campaign",
+    {
+      title: "Abrir campaña",
+      description: "Abre una campaña para un tenant y cultivo. Valida que el crop existe y que no hay campaña abierta. Calcula profile_hash (sha256 del row crop_profiles) y memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente).",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        crop: z.string().describe("Nombre del cultivo (crop_profiles.name)"),
+        note: z.string().optional().describe("Nota opcional de apertura"),
+      },
+    },
+    async ({ tenant, crop, note }) => {
+      const profile = await getCropProfileDb(crop);
+      if (!profile) {
+        const text = `crop no existe: ${crop}`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
+        };
+      }
+      const current = await getCurrentCampaignDb(tenant);
+      if (current) {
+        const text = `ya hay campaña abierta para tenant=${tenant} id=${current.id}`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { error: "campaign_already_open", tenant, campaign_id: current.id } as unknown as Record<string, unknown>,
+        };
+      }
+      const mods = await listModulesDb(tenant);
+      const filtered = mods.filter((m) => m.crop === crop).map((m) => m.id);
+      const profileHash = computeProfileHash(profile as Record<string, unknown>);
+      const memoryHash = await computeMemoryHash(crop);
+      try {
+        const id = await insertCampaignDb(tenant, crop, JSON.stringify(filtered), profileHash, memoryHash, note ?? null);
+        const text = `Campaña abierta ${id} tenant=${tenant} crop=${crop} modules=${filtered.join(",")} profile_hash=${profileHash.slice(0, 8)}…`;
+        return {
+          content: [{ type: "text", text: `${text}\n${summaryText({ id, tenant, crop, modules: filtered, profile_hash: profileHash, memory_hash: memoryHash })}` }],
+          structuredContent: { id, tenant, crop, modules: filtered, profile_hash: profileHash, memory_hash: memoryHash } as unknown as Record<string, unknown>,
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("campaigns_one_open_per_tenant") || msg.includes("duplicate") || msg.includes("unique")) {
+          const text = `ya hay campaña abierta para tenant=${tenant}`;
+          return {
+            content: [{ type: "text", text }],
+            structuredContent: { error: "campaign_already_open", tenant } as unknown as Record<string, unknown>,
+          };
+        }
+        throw err;
+      }
+    },
+  );
+
+  // — close_campaign ---------------------------------------------------------
+  server.registerTool(
+    "close_campaign",
+    {
+      title: "Cerrar campaña",
+      description: "Cierra la campaña abierta del tenant. Calcula memory_hash_close (sha256 de MEMORY.md al cerrar). Error si no hay abierta.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        note: z.string().optional().describe("Nota opcional de cierre"),
+      },
+    },
+    async ({ tenant, note }) => {
+      const current = await getCurrentCampaignDb(tenant);
+      if (!current) {
+        const text = `no hay campaña abierta para tenant=${tenant}`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { error: "no_open_campaign", tenant } as unknown as Record<string, unknown>,
+        };
+      }
+      const memoryHashClose = await computeMemoryHash(current.crop);
+      const row = await closeCampaignDb(current.id, memoryHashClose, note ?? null);
+      const text = `Campaña cerrada ${row.id} tenant=${tenant}`;
+      return {
+        content: [{ type: "text", text: `${text}\n${summaryText({ id: row.id, closed_at: row.closed_at, memory_hash_close: memoryHashClose })}` }],
+        structuredContent: { id: row.id, tenant, closed_at: row.closed_at, memory_hash_close: memoryHashClose } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — current_campaign -------------------------------------------------------
+  server.registerTool(
+    "current_campaign",
+    {
+      title: "Campaña actual",
+      description: "Retorna la campaña abierta (state='open') para el tenant, o null si no hay. Si tenant se omite, busca globalmente.",
+      inputSchema: {
+        tenant: z.string().optional().describe("Tenant; si se omite retorna la única abierta global si existe"),
+      },
+    },
+    async ({ tenant }) => {
+      const row = await getCurrentCampaignDb(tenant);
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `Sin campaña abierta${tenant ? ` tenant=${tenant}` : ""}` }],
+          structuredContent: { found: false, campaign: null } as unknown as Record<string, unknown>,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Campaña abierta ${row.id} tenant=${row.tenant} crop=${row.crop}\n${summaryText(row)}` }],
+        structuredContent: { found: true, campaign: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — list_campaigns ---------------------------------------------------------
+  server.registerTool(
+    "list_campaigns",
+    {
+      title: "Historial de campañas",
+      description: "Lista historial de campañas (abiertas y cerradas), opcionalmente filtrado por tenant.",
+      inputSchema: {
+        tenant: z.string().optional().describe("Tenant; si se omite lista todas"),
+      },
+    },
+    async ({ tenant }) => {
+      const rows = await listCampaignsDb(tenant);
+      const text = `Campañas${tenant ? ` tenant=${tenant}` : ""}: ${rows.length}`;
+      return {
+        content: [{ type: "text", text: `${text}\n${summaryText(rows)}` }],
+        structuredContent: { campaigns: rows } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — resolve_alert ----------------------------------------------------------
+  server.registerTool(
+    "resolve_alert",
+    {
+      title: "Resolver alerta invariante",
+      description: "Inserta una resolución manual en alert_resolutions para silenciar una alerta invariante. Matching por alert_name + module/fingerprint opcionales.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        alert_name: z.string().describe("Nombre de la alerta (cmd_sin_policy, invariant_ledger, budget_tokens)"),
+        module: z.string().optional().describe("Módulo específico; si se omite aplica a todos los módulos del tenant"),
+        fingerprint: z.string().optional().describe("Fingerprint específico; si se omite aplica a todos los fingerprints"),
+        note: z.string().optional().describe("Nota de resolución"),
+        resolved_by: z.string().optional().describe("Quién resuelve (default human)"),
+      },
+    },
+    async ({ tenant, alert_name, module, fingerprint, note, resolved_by }) => {
+      const id = await insertResolutionDb(tenant, alert_name, module ?? null, fingerprint ?? null, note ?? null, resolved_by ?? "human");
+      const text = `Resolución ${id} tenant=${tenant} alert=${alert_name}`;
+      return {
+        content: [{ type: "text", text: `${text}\n${summaryText({ id, tenant, alert_name, module: module ?? null, fingerprint: fingerprint ?? null })}` }],
+        structuredContent: { id, tenant, alert_name, module: module ?? null, fingerprint: fingerprint ?? null } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — list_invariant_alerts --------------------------------------------------
+  server.registerTool(
+    "list_invariant_alerts",
+    {
+      title: "Alertas invariantes",
+      description: "Lista alertas invariantes (cmd_sin_policy, invariant_ledger, budget_tokens) con estado is_open según regla de resolución (alerta posterior resolved mismo fingerprint o fila en alert_resolutions).",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        only_open: z.boolean().optional().describe("Si true, solo alertas abiertas"),
+      },
+    },
+    async ({ tenant, only_open }) => {
+      const rows = await listInvariantAlertsDb(tenant, !!only_open);
+      const text = `Alertas invariantes tenant=${tenant}${only_open ? " (solo abiertas)" : ""}: ${rows.length}`;
+      return {
+        content: [{ type: "text", text: `${text}\n${summaryText(rows)}` }],
+        structuredContent: { tenant, only_open: !!only_open, alerts: rows } as unknown as Record<string, unknown>,
       };
     },
   );
