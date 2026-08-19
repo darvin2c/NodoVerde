@@ -58,12 +58,14 @@ status: vigente
 
 ### Fase 5 — Hardware real (piloto mínimo)
 - 1 ESP32 flasheado con el YAML ESPHome de la Fase 0 + 1 sensor EC + 1 dosificadora.
-- Interlocks físicos. Decisión de radio campo (WiFi/LoRa/celular) se toma aquí.
+- Interlocks físicos. Radio campo: el sistema debe soportar WiFi + LoRa + celular (ADR-0015 §"Requisito multi-transporte"); el piloto decide **cuál usa cada ubicación**, no cuál existe.
+- Día 1 del piloto: experimentos de broker discovery en el orden acordado (mDNS → DNS fijo público → QR custom; celular exige hostname público) — plan detallado en ADR-0015 §"Plan de evaluación".
 - **Criterio de salida:** el piloto convive con el sim sin que el sistema distinga la diferencia.
 
 ### Fase 6 — PWA crece a UI completa
+- **Trigger cumplido 2026-08-19** (declarado por el dueño): la operación de la campaña de Fase 4 exige centro de alertas con remediación, vistas de módulos y aprobaciones pro — la portada read-only se quedó corta antes de empezar la campaña.
 - La PWA de Fase 1 crece: operación, vistas financieras completas, vista del agente.
-- Trigger de entrada: HA como cabina + PWA resumen demuestran quedarse cortos en operación real.
+- Implementado 2026-08-19: dashboard pro estilo shadcn-admin (Base UI + Tailwind v4), dark/light, sidebar + header con ⌘K y campana, rutas Overview/Módulos(+detalle)/Alertas/Finanzas/Aprobaciones/Cámaras/Sistema, centro de alertas con mapa de remediación en código (`pwa/src/lib/remediation.ts`) y resolución gobernada vía MCP (`alerts.resolve` → mcp-domain `resolve_alert`, ADR-0021).
 - Si integraciones externas lo exigen: fachada OpenAPI sobre los mismos servicios.
 
 ## Backlog diferido (con triggers)

@@ -3,19 +3,25 @@ import { observable } from "@trpc/server/observable";
 import { z } from "zod";
 import superjson from "superjson";
 import { sql } from "drizzle-orm";
-import { getDb } from "./db.js";
+import { getDb, type TerraDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
+import { resolveAlert } from "./mcpDomain.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
-  db: ReturnType<typeof getDb>;
+  db: TerraDb;
 };
 
 const t = initTRPC.context<TrpcContext>().create({ transformer: superjson });
 
 type FarmStatus = { tenant: string; name: string; location_name: string | null; tz: string | null };
+
+// Frontera cruda a drizzle: las queries usan sql`` crudo; el pool devuelve { rows }.
+// Cast centralizado aquí (una vez), no inline en cada procedure.
+type RawDb = { execute: (q: unknown) => Promise<{ rows: unknown[] }> };
+const rawDb = (db: unknown): RawDb => db as RawDb;
 
 export const appRouter = t.router({
   // ── SISTEMA: broker/DB/cerebro/sim ──
@@ -26,7 +32,7 @@ export const appRouter = t.router({
       // Última telemetría: max(time) de telemetry
       let lastTelemetry: string | null = null;
       try {
-        const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+        const res = await rawDb(ctx.db).execute(
           sql`SELECT max(time) as t FROM telemetry`
         );
         const row = (res.rows[0] as Record<string, unknown> | undefined);
@@ -46,7 +52,7 @@ export const appRouter = t.router({
       // Identidad de la finca desde DB (tenants — única fuente de verdad; la PWA tampoco hardcodea lugar)
       let farm: FarmStatus | null = null;
       try {
-        const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+        const res = await rawDb(ctx.db).execute(
           sql`SELECT id AS tenant, name, location_name, tz FROM tenants ORDER BY id LIMIT 1`
         );
         farm = (res.rows[0] as FarmStatus | undefined) ?? null;
@@ -62,14 +68,50 @@ export const appRouter = t.router({
         healthSummary,
         ts: Date.now()
       };
+    }),
+
+    // Salud de servicios del stack: broker, DB, portero, MCP dominio, finance, sim (lab + ctl)
+    services: t.procedure.query(async ({ ctx }) => {
+      const dbOk = await checkDb(ctx.db);
+      const mqttOk = mqttBus.isConnected();
+
+      type Probe = { name: string; url: string; ok: boolean | null; status: number | null; ms: number };
+      async function probe(name: string, url: string, headers?: Record<string, string>): Promise<Probe> {
+        const t0 = Date.now();
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 3000);
+          const res = await fetch(url, { signal: controller.signal, headers });
+          clearTimeout(timeout);
+          // Cualquier respuesta HTTP (incluso 4xx de un endpoint MCP que exige POST) prueba que el servicio vive
+          return { name, url, ok: res.status < 500, status: res.status, ms: Date.now() - t0 };
+        } catch {
+          return { name, url, ok: false, status: null, ms: Date.now() - t0 };
+        }
+      }
+
+      const probed = await Promise.all([
+        probe("policy", `${process.env.POLICY_URL ?? "http://localhost:7762"}/api/approvals?tenant=demo`, {
+          authorization: `Bearer ${process.env.POLICY_ADMIN_TOKEN ?? "dev-admin-token"}`
+        }),
+        probe("mcp-domain", process.env.MCP_DOMAIN_URL ?? "http://localhost:7760/mcp"),
+        probe("finance", process.env.MCP_FINANCE_URL ?? "http://localhost:7761/mcp"),
+        probe("sim-lab", process.env.SIM_LAB_URL ?? "http://localhost:7751/api/nodes")
+      ]);
+
+      return {
+        broker: { ok: mqttOk },
+        db: { ok: dbOk },
+        services: probed,
+        ts: Date.now()
+      };
     })
   }),
-
   // ── MÓDULOS ──
   modules: t.router({
     list: t.procedure.query(async ({ ctx }) => {
       try {
-        const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+        const res = await rawDb(ctx.db).execute(
           sql`SELECT m.tenant, m.id, m.crop, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max
               FROM modules m LEFT JOIN crop_profiles c ON c.name = m.crop ORDER BY m.tenant, m.id`
         );
@@ -82,6 +124,57 @@ export const appRouter = t.router({
         return [];
       }
     }),
+
+    // Detalle de un módulo: ficha + perfil de cultivo + últimas lecturas + alertas recientes del módulo
+    detail: t.procedure
+      .input(z.object({ tenant: z.string().default("demo"), id: z.string().min(1) }))
+      .query(async ({ ctx, input }) => {
+        const db = rawDb(ctx.db);
+        try {
+          const modRes = await db.execute(
+            sql`SELECT m.tenant, m.id, m.crop, m.created_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max, c.notes AS crop_notes
+                FROM modules m LEFT JOIN crop_profiles c ON c.name = m.crop
+                WHERE m.tenant = ${input.tenant} AND m.id = ${input.id}`
+          );
+          const module = (modRes.rows[0] as Record<string, unknown> | undefined) ?? null;
+          if (!module) return null;
+
+          const readingsRes = await db.execute(
+            sql`SELECT DISTINCT ON (metric) device, metric, value, time
+                FROM telemetry WHERE tenant = ${input.tenant} AND module = ${input.id}
+                ORDER BY metric, time DESC`
+          );
+
+          const alertsRes = await db.execute(
+            sql`SELECT a.time, a.name, a.severity, a.device, a.detail,
+                  CASE WHEN a.severity = 'info' THEN false
+                       WHEN (a.detail::jsonb ->> 'state') = 'resolved' THEN false
+                       WHEN EXISTS (
+                         SELECT 1 FROM alert_resolutions r
+                         WHERE r.tenant = a.tenant AND r.alert_name = a.name
+                           AND (r.module IS NULL OR r.module = a.module)
+                           AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint'))
+                       ) THEN false
+                       ELSE true END AS open
+                FROM alerts a WHERE a.tenant = ${input.tenant} AND a.module = ${input.id}
+                ORDER BY a.time DESC LIMIT 10`
+          );
+
+          const key = `${input.tenant}/${input.id}`;
+          const confidence = mqttBus.getLastConfidence().get(key) ?? null;
+          const health = mqttBus.getLastHealth().get(key) ?? null;
+
+          return {
+            module,
+            readings: readingsRes.rows as Array<{ device: string; metric: string; value: number | null; time: string }>,
+            alerts: alertsRes.rows as Array<{ time: string; name: string; severity: string; device: string | null; detail: string | null; open: boolean }>,
+            confidence,
+            health
+          };
+        } catch {
+          return null;
+        }
+      }),
 
     // Suscripción: fan-out de mqtt terra/+/+/confidence
     confidence: t.procedure.subscription(() => {
@@ -111,7 +204,7 @@ export const appRouter = t.router({
       .query(async ({ ctx, input }) => {
         const tenant = input?.tenant ?? "demo";
         try {
-          const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+          const res = await rawDb(ctx.db).execute(
             sql`SELECT DISTINCT ON (module, metric) module, device, metric, value, time
                 FROM telemetry WHERE tenant = ${tenant}
                 ORDER BY module, metric, time DESC`
@@ -126,6 +219,31 @@ export const appRouter = t.router({
         } catch {
           return {};
         }
+      }),
+
+    // Serie temporal reducida para sparklines (downsample en SQL con time_bucket)
+    series: t.procedure
+      .input(z.object({
+        tenant: z.string().default("demo"),
+        module: z.string().min(1),
+        metric: z.string().min(1),
+        hours: z.number().min(1).max(168).default(24)
+      }))
+      .query(async ({ ctx, input }) => {
+        try {
+          const bucket = input.hours <= 24 ? "30 minutes" : "2 hours";
+          const res = await rawDb(ctx.db).execute(
+            sql`SELECT time_bucket(${bucket}::interval, time) AS t, avg(value) AS v
+                FROM telemetry
+                WHERE tenant = ${input.tenant} AND module = ${input.module} AND metric = ${input.metric}
+                  AND time > now() - (${input.hours} || ' hours')::interval
+                  AND value IS NOT NULL
+                GROUP BY t ORDER BY t`
+          );
+          return (res.rows as Array<{ t: string; v: string | number }>).map((r) => ({ t: r.t, v: Number(r.v) }));
+        } catch {
+          return [];
+        }
       })
   }),
 
@@ -138,7 +256,7 @@ export const appRouter = t.router({
         // month = YYYY-MM, default mes actual UTC
         const month = input?.month ?? new Date().toISOString().slice(0, 7);
         try {
-          const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+          const res = await rawDb(ctx.db).execute(
             sql`SELECT
                   COALESCE(SUM(CASE WHEN kind = 'ingreso' THEN amount ELSE 0 END), 0) as ingresos,
                   COALESCE(SUM(CASE WHEN kind = 'gasto' THEN amount ELSE 0 END), 0) as gastos,
@@ -157,6 +275,51 @@ export const appRouter = t.router({
         } catch {
           return { month, ingresos: 0, gastos: 0, balance: 0, count: 0, empty: true };
         }
+      }),
+
+    // Movimientos recientes (historia inmutable: incluye anulados, se muestran como tales)
+    recentMovements: t.procedure
+      .input(z.object({ tenant: z.string().default("demo"), limit: z.number().min(1).max(100).default(30) }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenant = input?.tenant ?? "demo";
+        const limit = input?.limit ?? 30;
+        try {
+          const res = await rawDb(ctx.db).execute(
+            sql`SELECT id, ts, kind, amount, currency, category, note, attribution,
+                       voided_by, anula_a, source, created_by
+                FROM movements WHERE tenant = ${tenant}
+                ORDER BY ts DESC LIMIT ${limit}`
+          );
+          return res.rows as Array<{
+            id: string; ts: string; kind: string; amount: string; currency: string;
+            category: string; note: string | null; attribution: unknown;
+            voided_by: string | null; anula_a: string | null;
+            source: string | null; created_by: string | null;
+          }>;
+        } catch {
+          return [];
+        }
+      }),
+
+    // Gasto por categoría del mes (SUM en SQL — ADR-0011: cero aritmética en render)
+    byCategory: t.procedure
+      .input(z.object({ tenant: z.string().default("demo"), month: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenant = input?.tenant ?? "demo";
+        const month = input?.month ?? new Date().toISOString().slice(0, 7);
+        try {
+          const res = await rawDb(ctx.db).execute(
+            sql`SELECT category, COALESCE(SUM(amount), 0) AS total
+                FROM movements
+                WHERE tenant = ${tenant} AND kind = 'gasto'
+                  AND to_char(ts, 'YYYY-MM') = ${month}
+                  AND voided_by IS NULL AND anula_a IS NULL
+                GROUP BY category ORDER BY total DESC`
+          );
+          return (res.rows as Array<{ category: string; total: string }>).map((r) => ({ category: r.category, total: Number(r.total) }));
+        } catch {
+          return [];
+        }
       })
   }),
 
@@ -168,7 +331,7 @@ export const appRouter = t.router({
         const tenant = input?.tenant ?? "demo";
         const limit = input?.limit ?? 10;
         try {
-          const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+          const res = await rawDb(ctx.db).execute(
             sql`SELECT time, tenant, module, name, severity, device, detail
                 FROM alerts WHERE tenant = ${tenant} AND severity IN ('warn','critical')
                 ORDER BY time DESC LIMIT ${limit}`
@@ -249,6 +412,164 @@ export const appRouter = t.router({
         }
       }),
   }),
+  // ── OVERVIEW: KPIs de portada ──
+  overview: t.router({
+    kpis: t.procedure
+      .input(z.object({ tenant: z.string().default("demo") }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenant = input?.tenant ?? "demo";
+
+        // Módulos por estado (health vivo vía MQTT) + total registrado en DB
+        const byState: Record<string, number> = {};
+        for (const [key, h] of mqttBus.getLastHealth()) {
+          if (!key.startsWith(`${tenant}/`)) continue;
+          byState[h.state] = (byState[h.state] ?? 0) + 1;
+        }
+        let totalModules = 0;
+        let openAlerts = { warn: 0, critical: 0 };
+        let todaySpend = 0;
+        let campaign: { id: string; crop: string; opened_at: string } | null = null;
+        let lastTelemetry: string | null = null;
+        try {
+          const res = await rawDb(ctx.db).execute(sql`
+            SELECT
+              (SELECT count(*)::int FROM modules WHERE tenant = ${tenant}) AS total_modules,
+              (SELECT count(*)::int FROM alerts a WHERE a.tenant = ${tenant} AND a.severity = 'warn'
+                 AND a.time > now() - interval '24 hours'
+                 AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
+                 AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
+                    AND (r.module IS NULL OR r.module = a.module)
+                    AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))) AS open_warn,
+              (SELECT count(*)::int FROM alerts a WHERE a.tenant = ${tenant} AND a.severity = 'critical'
+                 AND a.time > now() - interval '24 hours'
+                 AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
+                 AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
+                    AND (r.module IS NULL OR r.module = a.module)
+                    AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))) AS open_critical,
+              (SELECT COALESCE(SUM(amount), 0) FROM movements WHERE tenant = ${tenant} AND kind = 'gasto'
+                 AND ts::date = now()::date AND voided_by IS NULL AND anula_a IS NULL) AS today_spend,
+              (SELECT max(time) FROM telemetry WHERE tenant = ${tenant}) AS last_telemetry
+          `);
+          const row = res.rows[0] as Record<string, unknown> | undefined;
+          totalModules = Number(row?.total_modules ?? 0);
+          openAlerts = { warn: Number(row?.open_warn ?? 0), critical: Number(row?.open_critical ?? 0) };
+          todaySpend = Number(row?.today_spend ?? 0);
+          lastTelemetry = (row?.last_telemetry as string | null) ?? null;
+
+          const campRes = await rawDb(ctx.db).execute(
+            sql`SELECT id, crop, opened_at FROM campaigns WHERE tenant = ${tenant} AND state = 'open' LIMIT 1`
+          );
+          campaign = (campRes.rows[0] as { id: string; crop: string; opened_at: string } | undefined) ?? null;
+        } catch { /* KPIs a cero = honesto */ }
+
+        // Confianza media de módulos con dato vivo
+        let confidenceSum = 0;
+        let confidenceN = 0;
+        for (const [key, c] of mqttBus.getLastConfidence()) {
+          if (!key.startsWith(`${tenant}/`)) continue;
+          confidenceSum += c.v;
+          confidenceN += 1;
+        }
+
+        let pendingApprovals = 0;
+        let policyReachable = true;
+        try {
+          const data = await fetchJson<{ actions?: unknown[] } | unknown[]>("/api/approvals", { params: { tenant } });
+          pendingApprovals = Array.isArray(data) ? data.length : (data.actions?.length ?? 0);
+        } catch {
+          policyReachable = false;
+        }
+
+        return {
+          modules: { total: totalModules, byState },
+          openAlerts,
+          pendingApprovals,
+          policyReachable,
+          todaySpend,
+          avgConfidence: confidenceN > 0 ? confidenceSum / confidenceN : null,
+          campaign,
+          lastTelemetry,
+          ts: Date.now()
+        };
+      })
+  }),
+
+  // ── ALERTAS: centro con estado abierto/resuelto (ADR-0021) ──
+  alerts: t.router({
+    list: t.procedure
+      .input(z.object({
+        tenant: z.string().default("demo"),
+        limit: z.number().min(1).max(100).default(50),
+        severity: z.enum(["info", "warn", "critical"]).optional(),
+        onlyOpen: z.boolean().default(false)
+      }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenant = input?.tenant ?? "demo";
+        const limit = input?.limit ?? 50;
+        try {
+          const res = await rawDb(ctx.db).execute(sql`
+            SELECT * FROM (
+              SELECT a.time, a.tenant, a.module, a.name, a.severity, a.device, a.detail,
+                CASE WHEN a.severity = 'info' THEN false
+                     WHEN COALESCE(a.detail::jsonb ->> 'state', 'pending') = 'resolved' THEN false
+                     WHEN EXISTS (
+                       SELECT 1 FROM alert_resolutions r
+                       WHERE r.tenant = a.tenant AND r.alert_name = a.name
+                         AND (r.module IS NULL OR r.module = a.module)
+                         AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint'))
+                     ) THEN false
+                     ELSE true END AS open
+              FROM alerts a
+              WHERE a.tenant = ${tenant}
+                AND (${input?.severity ?? null}::text IS NULL OR a.severity = ${input?.severity ?? null})
+              ORDER BY a.time DESC LIMIT 500
+            ) q
+            WHERE (${input?.onlyOpen ?? false}::boolean IS FALSE OR q.open)
+            ORDER BY q.time DESC LIMIT ${limit}
+          `);
+          const rows = (res.rows as Array<{
+            time: string; tenant: string; module: string; name: string; severity: string;
+            device: string | null; detail: string | null; open: boolean;
+          }>).map((r) => {
+            let detail: unknown = null;
+            if (typeof r.detail === "string") {
+              try { detail = JSON.parse(r.detail); } catch { detail = r.detail; }
+            } else detail = r.detail;
+            return { ...r, detail };
+          });
+          return rows;
+        } catch {
+          return [];
+        }
+      }),
+
+    // Resolver alerta: escritura gobernada vía MCP de dominio (ADR-0021)
+    resolve: t.procedure
+      .input(z.object({
+        tenant: z.string().default("demo"),
+        alertName: z.string().min(1),
+        module: z.string().optional(),
+        fingerprint: z.string().optional(),
+        note: z.string().optional()
+      }))
+      .mutation(async ({ input }) => {
+        try {
+          const data = await resolveAlert({
+            tenant: input.tenant,
+            alert_name: input.alertName,
+            module: input.module,
+            fingerprint: input.fingerprint,
+            note: input.note,
+            resolved_by: "pwa"
+          });
+          return { ok: true as const, data };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+        }
+      })
+  }),
+
   // ── CÁMARAS: último evento photo por módulo ──
   cameras: t.router({
     lastPhoto: t.procedure
@@ -256,7 +577,7 @@ export const appRouter = t.router({
       .query(async ({ ctx, input }) => {
         const tenant = input?.tenant ?? "demo";
         try {
-          const res = await (ctx.db as unknown as { execute: (q: unknown) => Promise<{ rows: unknown[] }> }).execute(
+          const res = await rawDb(ctx.db).execute(
             sql`SELECT DISTINCT ON (module) module, device, metric, value, time, raw
                 FROM telemetry WHERE tenant = ${tenant} AND metric = 'photo'
                 ORDER BY module, time DESC`
@@ -277,9 +598,9 @@ export type AppRouter = typeof appRouter;
 // helpers exportados para tests
 export { shapeConfidence, shapeHealth };
 
-async function checkDb(db: ReturnType<typeof getDb>): Promise<boolean> {
+async function checkDb(db: TerraDb): Promise<boolean> {
   try {
-    await (db as unknown as { execute: (q: unknown) => Promise<unknown> }).execute(sql`SELECT 1`);
+    await rawDb(db).execute(sql`SELECT 1`);
     return true;
   } catch {
     return false;

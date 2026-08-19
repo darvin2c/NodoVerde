@@ -98,6 +98,33 @@ WiFi y dirección del broker se provisionan por **captive portal** en el primer 
 
 **ESPHome fija el broker MQTT en compile-time.** El captive portal provisiona WiFi, pero no la dirección del broker: `mqtt:` en el YAML ESPHome se resuelve al compilar. En producción la dirección del broker no puede depender de recompilar por finca sin romper el ideal de "un solo binario". Esta ADR **no inventa solución** (no propone DNS fijo, QR con broker, ni mDNS como resuelto): la estrategia para que un firmware genérico descubra el broker de su finca queda como **decisión pendiente del firmware**, a resolver antes del piloto de hardware (Fase 5). Documentar la limitación es preferible a prometer un mecanismo no probado.
 
+### Plan de evaluación (acordado 2026-08-19, ejecutar con hardware real en Fase 5)
+
+Hechos verificados contra la documentación de ESPHome (2026.7.4):
+
+- El componente `qr_code` de ESPHome es **generador** (dibuja un QR de un string fijo en un display), **no escáner**. Provisionar el broker *hacia dentro* del dispositivo vía QR requiere cámara + decodificador: componente custom completo.
+- El componente `mqtt` exige `broker:` en compile-time; no hay discovery de servicio mDNS (`_mqtt._tcp`) ni lectura de config desde flash. Cualquiera de esas vías = custom component en C++ que mantenemos nosotros.
+- **Excepción nativa**: `broker:` acepta un *hostname* que el ESP32 resuelve por DNS al conectar — la única vía "un solo binario" con firmware 100% YAML stock.
+- mDNS **sin auth** es falsificable en LAN (broker impostor → comandos falsos a actuadores físicos); adoptarlo exige auth en Mosquitto.
+
+Orden de experimentos con el primer ESP32 (día 1 del piloto), de menor a mayor costo:
+
+1. **mDNS / hostname** — compilar con `broker: mosquitto.local` y verificar si el ESP32 resuelve el `.local` (mDNS a nivel de resolución de nombre, soportado parcialmente por ESP-IDF, no garantizado por ESPHome) o el DNS de la red. Si resuelve → decisión cerrada con cero código custom; el servidor Mosquitto se anuncia por mDNS.
+2. **DNS fijo con router de campo propio** — si (1) falla: `broker: broker.terraos.local`, el router de campo (que de todos modos hay que decidir: WiFi/LoRa/celular) sirve DNS+DHCP y resuelve el nombre a su Mosquitto. Sigue siendo firmware stock.
+3. **QR / captive portal extendido (componente custom)** — solo si el piloto demuestra que los nodos deben enchufarse a redes ajenas sin infra propia. Incluye obligatoriamente auth en el broker. Es el mayor costo de mantenimiento: se adopta solo con evidencia del piloto, no por anticipado.
+
+Regla: **no escribir firmware custom hasta que el hardware real demuestre que el hostname no basta.** La decisión es reversible en cualquier momento — el claiming (DB) ya aísla la identidad de la conectividad.
+
+### Requisito multi-transporte (acordado 2026-08-19)
+
+El sistema **debe soportar WiFi, LoRa y celular** como transportes del plano dispositivo. El principio multi-transporte ya estaba declarado arriba ("el chip no distingue si su lectura viaja por WiFi al broker o por LoRa a un gateway"); esta sección fija lo que eso implica:
+
+- **Un binario por transporte, no un binario universal.** ESPHome cubre WiFi nativo y celular con componentes de módem externos; LoRaWAN queda fuera de ESPHome (stack propio o módulo tipo RAK). Lo inviolable se mantiene: los binarios difieren **solo en radio**, jamás en identidad — `tenant`/`module`/`cultivo` siguen viviendo solo en `device_identities`.
+- **LoRa termina en gateway.** El nodo LoRa habla LoRaWAN; un gateway (ChirpStack, entra por trigger del backlog) traduce y publica al plano dispositivo MQTT en nombre del nodo, usando el mismo `hw_id`. Para el router y el resto de la plataforma, un nodo LoRa es indistinguible de uno WiFi.
+- **Celular fija el broker discovery.** Un nodo celular no puede usar mDNS ni DNS local: necesita un **hostname público fijo** (broker alcanzable vía internet/VPN). Ese mismo hostname sirve para WiFi → el DNS fijo (versión pública) se convierte en la respuesta base del plan de evaluación de arriba, y mDNS queda como conveniencia para redes locales. Los experimentos de Fase 5 deben validar ambos escenarios.
+- **LoRa = sensores y actuación lenta, no lazo fino.** LoRaWAN clase A solo recibe downlink tras un uplink y con duty cycle limitado: un `cmd/` puede esperar minutos. Clases de acción aptas por LoRa: relleno de tanque, recirculación programada. No aptas: dosificación fina de pH/nutrientes (ventana de verificación corta). El watchdog debe parametrizar sus ventanas de verificación cruzada **por transporte**; el portero debe conocer el transporte del módulo para rechazar acciones incompatibles. Esta parametrización es prerequisito de código cuando exista el primer nodo LoRa, no antes (regla de admisión).
+- **Celular cuesta datos por nodo** y exige auth + TLS en el broker (tránsito por internet). Refuerza la decisión de auth ya necesaria por el riesgo mDNS.
+
 ## Enmienda a ADR-0007
 
 Donde ADR-0007 dice "Los topics MQTT incluyen el tenant: `terraos/{tenant}/{parcela}/...`", debe leerse con esta ADR: **los topics del plano dispositivo NO llevan `tenant`** (solo `hw_id`); el `tenant` existe en el **plano interno** (`terra/{tenant}/{module}/...`) y en la DB (`device_identities` + tablas de dominio). El diseño multi-tenant se mantiene — cambia el lugar donde vive el `tenant` en el bus.

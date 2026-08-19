@@ -115,7 +115,7 @@ Toda función tiene exactamente un dueño. Quien no es dueño, tiene prohibido e
 
 | Superficie | Dueña de |
 |---|---|
-| **PWA terraOS** (Vite+React+tRPC, read-only → crece a UI completa en Fase 6) | Vista resumen unificada |
+| **PWA terraOS** (Vite+React+tRPC+shadcn/Base UI, panel de control — Fase 6 implementada) | Vista resumen unificada |
 | Home Assistant | Operación del fierro (botones → portero) |
 | Grafana | Análisis profundo + alertas de umbral |
 | Chat | Conversación, aprobaciones, captura financiera |
