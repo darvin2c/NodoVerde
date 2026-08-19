@@ -21,6 +21,12 @@ import { fetchWeather, weatherAt, syntheticWeather } from "../weather.js";
 import type { WeatherSeries } from "../weather.js";
 import { loadScenario } from "../scenario.js";
 import type { Scenario } from "../scenario.js";
+import {
+  getCatchUpConfig,
+  computeGapSimMs,
+  shouldCatchUp,
+  catchUpPlan,
+} from "./catchup.js";
 
 // --- CLI parsing ---
 const args = process.argv.slice(2);
@@ -142,6 +148,67 @@ function takePendingDuration(hwId: string, device: string, fallbackMs: number): 
   if (m?.has(device)) { const v = m.get(device)!; m.delete(device); return v; }
   return fallbackMs;
 }
+// --- paso de física reusable: avanza dtSimSec segundos a partir de stepSimMs ---
+function physicsStep(dtSimSec: number, stepSimMs: number): void {
+  const stepW = weatherAt(weather, stepSimMs - startMs);
+  for (let idx = 0; idx < modules.length; idx++) {
+    const prev = modules[idx];
+    modules[idx] = stepModule(
+      prev,
+      dtSimSec,
+      stepSimMs,
+      stepW.et0,
+      { airTemp: stepW.airTemp, humidity: stepW.humidity },
+      DEFAULT_PARAMS,
+      { ecConsumptionMul: scenario.ec_consumption_mul ?? 1 },
+    );
+    for (const [timer, device] of TIMER_DEVICES) {
+      if ((prev[timer] as number) > 0 && (modules[idx][timer] as number) === 0) {
+        const log = offLog.get(prev.id) ?? [];
+        const durationMs = takePendingDuration(prev.id, device, 2000);
+        log.push({ device, ts: stepSimMs + dtSimSec * 1000, durationMs });
+        if (log.length > 100) log.shift();
+        offLog.set(prev.id, log);
+      }
+    }
+  }
+}
+
+// --- catch-up honesto tras pausa (ADR-0021) — corre ANTES de aceptar requests ---
+if (persisted) {
+  if (persisted.savedAtMs == null) {
+    console.log("[physics] estado sin savedAtMs — sin catch-up (estado viejo)");
+  } else {
+    const { minSimMs, maxSteps } = getCatchUpConfig();
+    const gapSimMs = computeGapSimMs(persisted.savedAtMs, Date.now(), speed);
+    if (!shouldCatchUp(gapSimMs, minSimMs)) {
+      const gapH = gapSimMs != null ? (gapSimMs / 3_600_000).toFixed(2) : "0";
+      console.log(`[physics] catch-up no necesario: gap ${gapH}h sim < umbral ${(minSimMs / 60000).toFixed(1)} min`);
+    } else {
+      const gap = gapSimMs!;
+      const { steps, truncated } = catchUpPlan(gap, maxSteps);
+      const realHours = (Date.now() - persisted.savedAtMs) / 3_600_000;
+      const simHours = (steps * 1000) / 3_600_000;
+      console.log(`[physics] catch-up: +${simHours.toFixed(2)}h sim (apagado ${realHours.toFixed(2)}h reales) — ${steps} pasos`);
+      if (truncated) {
+        console.warn(`[physics] catch-up truncado: gap ${(gap / 3_600_000).toFixed(2)}h sim requiere ${Math.ceil(gap / 1000)} pasos > cap ${maxSteps} — se aplican ${steps}`);
+      }
+      let remainingMs = steps * 1000;
+      for (let i = 0; i < steps; i++) {
+        const dt = remainingMs >= 1000 ? 1 : remainingMs / 1000;
+        const stepSimMs = simClock.nowSim();
+        physicsStep(dt, stepSimMs);
+        simClock.advanceSim(dt * 1000);
+        remainingMs -= dt * 1000;
+        if (remainingMs <= 0) break;
+      }
+      console.log(`[physics] catch-up completado: simMs ${persisted.simMs} → ${simClock.nowSim()}`);
+      // el reloj ya quedó resincronizado; la próxima persistencia parte del nuevo simMs
+      lastPersistSimMs = simClock.nowSim();
+    }
+  }
+}
+
 const interval = setInterval(() => {
   const dtRealMs = 1000;
   const dtSimSec = simClock.dtSimSec(dtRealMs);
@@ -152,28 +219,7 @@ const interval = setInterval(() => {
   const subDt = dtSimSec / subSteps;
   for (let s = 0; s < subSteps; s++) {
     const stepSimMs = nowSim - dtSimSec * 1000 + s * subDt * 1000;
-    const stepW = weatherAt(weather, stepSimMs - startMs);
-    for (let idx = 0; idx < modules.length; idx++) {
-      const prev = modules[idx];
-      modules[idx] = stepModule(
-        prev,
-        subDt,
-        stepSimMs,
-        stepW.et0,
-        { airTemp: stepW.airTemp, humidity: stepW.humidity },
-        DEFAULT_PARAMS,
-        { ecConsumptionMul: scenario.ec_consumption_mul ?? 1 },
-      );
-      for (const [timer, device] of TIMER_DEVICES) {
-        if ((prev[timer] as number) > 0 && (modules[idx][timer] as number) === 0) {
-          const log = offLog.get(prev.id) ?? [];
-          const durationMs = takePendingDuration(prev.id, device, 2000);
-          log.push({ device, ts: stepSimMs + subDt * 1000, durationMs });
-          if (log.length > 100) log.shift();
-          offLog.set(prev.id, log);
-        }
-      }
-    }
+    physicsStep(subDt, stepSimMs);
   }
 
   if (nowSim - lastPersistSimMs >= 30_000) {

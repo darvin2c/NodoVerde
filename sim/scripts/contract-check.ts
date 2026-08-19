@@ -1,6 +1,6 @@
 // Contract test nivel 2: captura mensajes vivos del broker y los valida
 // contra los schemas de contract/asyncapi.yaml. Uso: pnpm contract [segundos]
-// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.6.0):
+// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.7.0):
 //   - dispositivo (4-5 seg) — terra/{hw_id}/{device}/{metric}/reading|event|status|confidence, request, cmd (Fase 3)
 //   - interno (5-6 seg)     — terra/{tenant}/{module}/{device}/{metric}/reading|event|status|confidence, request/cmd
 //   - plataforma (4 seg)    — terra/{tenant}/{module}/confidence|health|alert (servicios de dominio DIRECTO, sin hw_id)
@@ -143,5 +143,5 @@ setTimeout(() => {
     for (const e of errors.slice(0, 20)) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.6.0");
+  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.7.0");
 }, seconds * 1000);

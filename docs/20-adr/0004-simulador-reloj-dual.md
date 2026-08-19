@@ -4,7 +4,7 @@ title: "ADR-0004: Simulador persistente con reloj dual"
 description: Gemelo digital como servicio permanente; 1:1 para campaña, Nx para tests; física + estocástica, IA solo para imágenes y escenarios
 tags: [adr, simulador, testing, fao56]
 created: 2026-08-15
-status: aceptado
+status: aceptado (enmienda parcial por ADR-0021: la campaña de Fase 4 admite pausas honestas — apagados declarados con el reloj de los datos como referencia de frescura; el reloj dual 1:1/Nx se mantiene intacto para tests)
 ---
 
 # ADR-0004: Simulador persistente con reloj dual

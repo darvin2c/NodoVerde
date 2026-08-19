@@ -28,7 +28,7 @@ status: vigente
 - **Criterio de salida:** lazo visible — sim → MQTT → Telegraf → TimescaleDB → tarjetas vivas en Home Assistant.
 
 ### Fase 1 — Cerebro observador
-- OpenClaw 24/7 (agente único con skills de cultivo cargables; ADR-0012 etapa inicial) + **bridge MQTT↔OpenClaw** (servicio delgado) + acceso read-only vía MCP.
+- OpenClaw 24/7 multi-agente (orquestador + expertos por especie con memoria propia; ADR-0019) + **bridge MQTT↔OpenClaw** (servicio delgado) + acceso read-only vía MCP.
 - Canal WhatsApp/Telegram: reportes diarios, alertas, fotos.
 - **PWA terraOS** (ADR-0014): pantalla de estado read-only por secciones (sistema, módulos, campo, finanzas, pendientes, cámaras).
 - Watchdog propio: salud de dispositivos (silencio/congelado/imposible/LWT). Umbrales simples en Grafana.
@@ -50,10 +50,11 @@ status: vigente
 - Autonomía gradual por clase de acción (relleno de agua primero, dosificación después).
 - **Criterio de salida:** escenario E2E "EC baja": agente detecta → propone dosificar → humano aprueba → dosificadora actúa → EC sube → costo en ledger.
 
-### Fase 4 — Campaña 1:1
-- Simulador en reloj real una temporada completa (ciclo lechuga ~45 días).
-- Watchdogs de invariantes: todo movimiento con categoría+moneda+imputación 100%, cero comandos sin policy, presupuesto de tokens.
-- **Criterio de salida:** campaña completa sin violación de invariantes.
+### Fase 4 — Campaña con pausas honestas (ADR-0021)
+- Simulador una temporada completa (ciclo lechuga ~45 días **de reloj sim**). Admite apagados declarados en workstation: pausas totales nocturnas + una caída parcial semanal del sim con stack vivo — las pausas son parte del protocolo (matriz de degradación ADR-0010), no violaciones.
+- Prerequisitos de código (verificables acelerado): catch-up del sim al reanudar (el mundo vive la pausa, el reloj se resincroniza), alerta `data_gap` en watchdog, alerta `cmd_sin_policy` en router, cron de tokens determinístico, tabla `campaigns` + `open/close_campaign`, chequeo `invariant_ledger` en finance.
+- Invariantes, cada una validada por su dueño y publicada al topic `alert` con estado pendiente/resuelta: finance → imputación 100%; router → cero comandos sin policy; cron → presupuesto de tokens (techo USD/mes).
+- **Criterio de salida:** campaña completa con **cero alertas de invariante sin resolver al cierre** (una alerta corregida no invalida).
 
 ### Fase 5 — Hardware real (piloto mínimo)
 - 1 ESP32 flasheado con el YAML ESPHome de la Fase 0 + 1 sensor EC + 1 dosificadora.
@@ -70,8 +71,7 @@ status: vigente
 | Pieza | Trigger de entrada |
 |---|---|
 | Policy module → servicio separado | Multi-finca operativo |
-| Orquestador + expertos por cultivo con memoria propia (ADR-0012) | ≥2 cultivos simultáneos reales en campaña |
-| Learning loop (destilación automática, estilo Hermes) | ≥1 campaña de decisiones registradas |
+| Learning loop (destilación automática, estilo Hermes) | ≥1 campaña de decisiones registradas (tabla `campaigns` + audit del portero, ADR-0021) |
 | IA generativa para fotos del sim | Pipeline de visión funcionando |
 | Escenarios generados por LLM | Los escenarios YAML se quedan cortos |
 | OpenAPI | Primera API REST real |

@@ -5,7 +5,6 @@
 // - HA discovery: al resolver un hw_id conocido por primera vez (o si cambia la asignación), publica configs con topics internos.
 
 import mqtt from "mqtt";
-import { resolveByHwId, resolveByModule, closePool } from "./db.js";
 import {
   parseDeviceTopic,
   parseInternalTopic,
@@ -19,6 +18,14 @@ import {
   type DeviceParsed,
   type InternalParsed,
 } from "./topics.js";
+import {
+  classifyCmdReason,
+  isRateLimited,
+  markAlertPublished,
+  buildAlertPayload,
+  buildAlertTopic,
+} from "./cmdAlert.js";
+import { resolveByHwId, resolveByModule, closePool } from "./db.js";
 import { buildDiscoveryConfigs } from "./discovery.js";
 
 const MQTT_URL = process.env.MQTT_URL ?? "mqtt://localhost:1883";
@@ -251,6 +258,20 @@ async function handleInternalCmd(
   const cmd = parseCmdPayload(payload);
   if (!cmd) {
     console.warn(`[router] cmd descartado sin policy_id o payload inválido ${topic}`);
+    // ADR-0021: alerta cmd_sin_policy con rate-limit 60s por (topic,reason)
+    const reason = classifyCmdReason(payload);
+    const now = Date.now();
+    if (!isRateLimited(topic, reason, now)) {
+      const alertTopic = buildAlertTopic(tenant, mod);
+      const alertPayload = buildAlertPayload(device, topic, reason, now);
+      const buf = Buffer.from(JSON.stringify(alertPayload));
+      try {
+        await publish(alertTopic, buf, { qos: 1, retain: false });
+        markAlertPublished(topic, reason, now);
+      } catch (err) {
+        console.error(`[router] error publicando alerta cmd_sin_policy ${alertTopic}`, err);
+      }
+    }
     return;
   }
 

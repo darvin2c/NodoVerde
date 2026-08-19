@@ -9,6 +9,7 @@ export type PersistedState = {
   speed: number;
   modules: ModuleState[];
   scenario: string;
+  savedAtMs?: number; // reloj real al guardar (para catch-up honesto tras pausa)
 };
 
 function statePath(): string {
@@ -26,7 +27,8 @@ function statePath(): string {
 export function saveState(state: PersistedState, customPath?: string): void {
   const p = customPath ?? statePath();
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(state, null, 2), "utf-8");
+  const toSave = { ...state, savedAtMs: Date.now() } as PersistedState;
+  writeFileSync(p, JSON.stringify(toSave, null, 2), "utf-8");
 }
 
 export function loadState(customPath?: string): PersistedState | null {

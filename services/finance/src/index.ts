@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import mqtt from "mqtt";
 import { createMcpServer } from "./server.js";
 import { pool } from "./db.js";
 import { startConsumer } from "./consumer.js";
+import { startLedgerInvariantChecker, type LedgerCheckerHandle } from "./ledgerInvariant.js";
 
 const FINANCE_PORT = parseInt(process.env.FINANCE_PORT ?? "7761", 10);
 
@@ -24,11 +26,17 @@ async function readBody(req: IncomingMessage): Promise<unknown | undefined> {
 }
 
 async function main(): Promise<void> {
-  // Consumer MQTT (no bloqueante; si MQTT no disponible log y sigue)
+  let consumerClient: mqtt.MqttClient | null = null;
   try {
-    startConsumer();
+    consumerClient = startConsumer();
   } catch (err) {
     console.error("[terra-finance] consumer start failed", err);
+  }
+  let ledgerChecker: LedgerCheckerHandle | null = null;
+  try {
+    ledgerChecker = startLedgerInvariantChecker(consumerClient);
+  } catch (err) {
+    console.error("[terra-finance] ledgerInvariant start failed", err);
   }
 
   const httpServer = createServer(async (req, res) => {
@@ -70,6 +78,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[terra-finance] ${signal} — cerrando`);
+    ledgerChecker?.stop();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await pool.end();
     console.log("[terra-finance] cerrado");

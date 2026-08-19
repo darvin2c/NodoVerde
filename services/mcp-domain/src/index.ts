@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./server.js";
 import { pool } from "./db.js";
+import { writePool } from "./write.js";
 
 const MCP_DOMAIN_PORT = parseInt(process.env.MCP_DOMAIN_PORT ?? "7760", 10);
 
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
     console.log(`[mcp-domain] ${signal} — cerrando`);
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await pool.end();
+    await writePool.end();
     console.log("[mcp-domain] cerrado");
     process.exit(0);
   }

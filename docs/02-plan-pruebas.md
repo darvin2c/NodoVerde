@@ -21,7 +21,7 @@ Cada fase tiene dos verificaciones: **manual** (lo que tú ves y tocas) y **auto
 | Ver curvas del día en Grafana | Unit: reloj dual (1:1 y Nx producen misma física por día simulado) |
 | Botón prender/apagar recirculación → caudalímetro se mueve | Integración: cada payload MQTT valida contra AsyncAPI v0.3.0 (contract test) |
 | Escenario `sensor_muerto`: tarjeta se queda gris, status `offline` por LWT | Integración: Telegraf escribe lecturas en TimescaleDB |
-| Apagar todo, prender mañana: el tanque sigue donde estaba | Integración: estado del sim sobrevive reinicio |
+| Apagar todo, prender mañana: el mundo vivió la noche (catch-up: tanque/EC evolucionaron sin lecturas del hueco) y el sistema declara el gap | Integración: estado del sim sobrevive reinicio + catch-up integra el hueco (ADR-0021) |
 | | Unit: RNG con semilla fija → misma corrida reproducible |
 
 **Criterio de salida:** lazo visible sim → MQTT → Telegraf → TimescaleDB → HA.
@@ -67,12 +67,17 @@ Cada fase tiene dos verificaciones: **manual** (lo que tú ves y tocas) y **auto
 
 **Criterio de salida:** E2E "EC baja" pasa de punta a punta.
 
-## Fase 4 — Campaña 1:1 (~45 días, ciclo lechuga)
+## Fase 4 — Campaña con pausas honestas (~45 días de reloj sim, ciclo lechuga; ADR-0021)
+
+**Prerequisitos de código (nivel 2-3, acelerados):** catch-up del sim al reanudar (apagado de 8 h → el mundo vivió la noche, la confianza cae y se recupera sola con lecturas frescas), alerta `data_gap` en el arranque, alerta `cmd_sin_policy` del router, cron de tokens → movimiento `software` diario, chequeo `invariant_ledger` en finance, `open/close_campaign` con hash de perfil y memoria.
 
 | Manual | Automática |
 |---|---|
-| Revisión semanal: memoria del experto (Markdown) + decisiones tomadas | Invariantes continuas: imputación 100%, cero comandos sin policy, tokens dentro de presupuesto → alertas, no pass/fail |
-| Al cierre: ¿el experto destiló lecciones correctas? | Grafana: histórico de confianza por módulo |
+| Revisión semanal: memoria del experto (Markdown) + decisiones tomadas | Invariantes continuas, cada una validada por su dueño (ADR-0021): imputación 100% (finance), cero comandos sin policy (router), presupuesto de tokens en USD/mes (cron) → alertas con estado pendiente/resuelta |
+| Protocolo de pausas: apagado nocturno → el reporte declara el gap ("sin datos de X a Y"); caída parcial semanal del sim → oficina activa (pide fotos/mediciones), finanzas siguen | Reincorporación: gap detectado y reportado, confianza se recupera con datos nuevos, portero bloquea actuación mientras confianza baja (ADR-0010) |
+| Al cierre: ¿el experto destiló lecciones correctas? ¿la campaña quedó registrada con perfil + memoria? | Grafana: histórico de confianza por módulo |
+
+**Criterio de salida (decidible):** 45 días de sim completos con **cero alertas de invariante en estado pendiente al cierre**. Una violación detectada y corregida (ej: movimiento anulado + recreado, ADR-0011) no invalida la fase.
 
 ## Fase 5 — Piloto hardware real
 
