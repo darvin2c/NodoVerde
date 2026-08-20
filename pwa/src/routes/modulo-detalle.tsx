@@ -1,12 +1,23 @@
-import { useQuery } from "@tanstack/react-query";
-import { useParams, Link } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useParams, Link, useNavigate } from "@tanstack/react-router";
+import { ArrowLeft, Pencil, PlugZap, Archive } from "lucide-react";
+import { toast } from "sonner";
 import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Progress } from "@/components/ui/progress.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Button } from "@/components/ui/button.tsx";
+import { Input } from "@/components/ui/input.tsx";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog.tsx";
 import { Sparkline } from "@/components/sparkline.tsx";
 import { healthVariant } from "@/lib/live.ts";
 import { remediationFor } from "@/lib/remediation.ts";
@@ -65,6 +76,8 @@ export function ModuloDetallePage() {
   for (const r of data.readings) readings[r.metric] = r;
   const conf = data.confidence;
   const health = data.health;
+  const displayName = (m.name as string | null) ?? moduleId;
+  const retired = m.retired_at != null;
 
   return (
     <div className="space-y-6">
@@ -73,10 +86,23 @@ export function ModuloDetallePage() {
           <ArrowLeft className="size-4" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-xl font-bold tracking-tight">{moduleId} <span className="text-sm font-normal text-muted-foreground">· {String(m.crop)}</span></h1>
+          <h1 className="text-xl font-bold tracking-tight">
+            {displayName}{" "}
+            <span className="text-sm font-normal text-muted-foreground">· {moduleId} · {String(m.crop)}</span>
+          </h1>
         </div>
+        {retired && <Badge variant="outline">retirado</Badge>}
         <Badge variant={healthVariant(health?.state)}>{health?.state ?? "sin health"}</Badge>
       </div>
+
+      {/* Configuración: nombre, fierro vinculado, retiro (escrituras gobernadas vía MCP, ADR-0022) */}
+      <ConfigCard
+        tenant={tenant}
+        moduleId={moduleId}
+        name={(m.name as string | null) ?? null}
+        retired={retired}
+        hardware={data.hardware}
+      />
 
       {/* Lecturas vs rangos del perfil */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -240,5 +266,150 @@ function RangeRow({ label, min, max, unit }: { label: string; min: number | null
       <span className="text-muted-foreground">{label}</span>
       <span className="font-mono">{min ?? "?"} – {max ?? "?"}{unit ? ` ${unit}` : ""}</span>
     </div>
+  );
+}
+
+// — Configuración del módulo (ADR-0022): renombrar, vincular fierro, retirar —
+// Las escrituras van al MCP de dominio (gobernadas); la PWA nunca escribe la DB.
+
+function ConfigCard({ tenant, moduleId, name, retired, hardware }: {
+  tenant: string;
+  moduleId: string;
+  name: string | null;
+  retired: boolean;
+  hardware: { hw_id: string; claimed_by: string | null; claimed_at: string } | null;
+}) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [claimOpen, setClaimOpen] = useState(false);
+  const [retireOpen, setRetireOpen] = useState(false);
+  const [newName, setNewName] = useState(name ?? "");
+  const [hwId, setHwId] = useState("");
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["modules.detail", moduleId] });
+    queryClient.invalidateQueries({ queryKey: ["modules.list"] });
+    queryClient.invalidateQueries({ queryKey: ["overview.kpis"] });
+  };
+
+  const renameMut = useMutation({
+    mutationFn: () => trpc.modules.update.mutate({ tenant, module: moduleId, name: newName.trim() }),
+    onSuccess: () => {
+      toast.success("Módulo renombrado", { description: "Home Assistant actualiza el área en segundos (evento meta)" });
+      invalidate();
+      setRenameOpen(false);
+    },
+    onError: (err) => toast.error("No se pudo renombrar", { description: (err as Error).message })
+  });
+
+  const claimMut = useMutation({
+    mutationFn: () => trpc.modules.claim.mutate({ tenant, module: moduleId, hw_id: hwId.trim() }),
+    onSuccess: () => {
+      toast.success("Fierro vinculado", { description: `${hwId} → ${moduleId} — aparece en HA al primer mensaje` });
+      invalidate();
+      setClaimOpen(false);
+      setHwId("");
+    },
+    onError: (err) => toast.error("No se pudo vincular", { description: (err as Error).message })
+  });
+
+  const retireMut = useMutation({
+    mutationFn: () => trpc.modules.retire.mutate({ tenant, module: moduleId }),
+    onSuccess: () => {
+      toast.success("Módulo retirado", { description: "historia conservada — nada se borra (ADR-0011)" });
+      invalidate();
+      setRetireOpen(false);
+      navigate({ to: "/modulos" });
+    },
+    onError: (err) => {
+      toast.error("No se pudo retirar", { description: (err as Error).message });
+      setRetireOpen(false);
+    }
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Configuración</CardTitle>
+        <CardDescription>provisionamiento gobernado — el portero de dominio valida cada cambio</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center gap-2">
+        <div className="flex-1 min-w-48 text-sm">
+          <span className="text-muted-foreground">Fierro: </span>
+          {hardware ? (
+            <span className="font-mono">{hardware.hw_id} <span className="text-xs text-muted-foreground">(claim {hardware.claimed_by ?? "?"})</span></span>
+          ) : (
+            <span className="text-muted-foreground">sin hardware vinculado</span>
+          )}
+        </div>
+        {!retired && (
+          <>
+            <Button variant="outline" size="sm" onClick={() => { setNewName(name ?? ""); setRenameOpen(true); }}>
+              <Pencil className="size-3.5" /> Renombrar
+            </Button>
+            {!hardware && (
+              <Button variant="outline" size="sm" onClick={() => setClaimOpen(true)}>
+                <PlugZap className="size-3.5" /> Vincular fierro
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={() => setRetireOpen(true)}>
+              <Archive className="size-3.5" /> Retirar
+            </Button>
+          </>
+        )}
+        {retired && <p className="text-xs text-muted-foreground">módulo retirado — solo lectura histórica</p>}
+
+        <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Renombrar {moduleId}</DialogTitle>
+              <DialogDescription>El nombre aparece en la PWA, el área de Home Assistant y el reporte del cerebro.</DialogDescription>
+            </DialogHeader>
+            <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Mesa Norte" autoFocus />
+            <DialogFooter>
+              <Button onClick={() => renameMut.mutate()} disabled={newName.trim().length === 0 || renameMut.isPending}>
+                {renameMut.isPending ? "Guardando…" : "Guardar"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={claimOpen} onOpenChange={setClaimOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Vincular fierro a {moduleId}</DialogTitle>
+              <DialogDescription>
+                hw_id de fábrica del ESP32: 12 hex minúsculas (MAC sin dos puntos). Lo imprime el nodo al arrancar.
+              </DialogDescription>
+            </DialogHeader>
+            <Input value={hwId} onChange={(e) => setHwId(e.target.value)} placeholder="020000000005" className="font-mono" autoFocus />
+            <DialogFooter>
+              <Button onClick={() => claimMut.mutate()} disabled={!/^[0-9a-f]{12}$/.test(hwId.trim()) || claimMut.isPending}>
+                {claimMut.isPending ? "Vinculando…" : "Vincular"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={retireOpen} onOpenChange={setRetireOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Retirar {moduleId}</DialogTitle>
+              <DialogDescription>
+                Deja de aceptar telemetría y sale de Home Assistant. Su historia (telemetría, alertas, gastos) se conserva — nada se borra.
+                Bloqueado si está en la campaña abierta.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setRetireOpen(false)}>Cancelar</Button>
+              <Button variant="destructive" onClick={() => retireMut.mutate()} disabled={retireMut.isPending}>
+                {retireMut.isPending ? "Retirando…" : "Retirar módulo"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </CardContent>
+    </Card>
   );
 }

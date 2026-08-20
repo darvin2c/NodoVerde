@@ -14,6 +14,10 @@ export type DeviceIdentity = {
   module: string;
   claimedBy: string | null;
   claimedAt: Date;
+  /** Nombre humano del módulo (modules.name, ADR-0022) — null si sin nombre */
+  moduleName: string | null;
+  /** true si el módulo está retirado: no acepta telemetría ni discovery */
+  moduleRetired: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -67,9 +71,11 @@ export async function resolveByHwId(hwId: string): Promise<DeviceIdentity | null
 
   try {
     const { rows } = await pool.query(
-      `SELECT hw_id, tenant, module, claimed_by, claimed_at
-       FROM device_identities
-       WHERE hw_id = $1
+      `SELECT d.hw_id, d.tenant, d.module, d.claimed_by, d.claimed_at,
+              m.name AS module_name, m.retired_at AS module_retired_at
+       FROM device_identities d
+       LEFT JOIN modules m ON m.tenant = d.tenant AND m.id = d.module
+       WHERE d.hw_id = $1
        LIMIT 1`,
       [hwId],
     );
@@ -85,6 +91,8 @@ export async function resolveByHwId(hwId: string): Promise<DeviceIdentity | null
       module: string;
       claimed_by: string | null;
       claimed_at: string | Date;
+      module_name: string | null;
+      module_retired_at: string | Date | null;
     };
 
     const identity: DeviceIdentity = {
@@ -93,6 +101,8 @@ export async function resolveByHwId(hwId: string): Promise<DeviceIdentity | null
       module: row.module,
       claimedBy: row.claimed_by,
       claimedAt: row.claimed_at instanceof Date ? row.claimed_at : new Date(row.claimed_at),
+      moduleName: row.module_name,
+      moduleRetired: row.module_retired_at != null,
     };
 
     cacheByHwId.set(hwId, { identity, expiresAt: now + TTL_MS });
@@ -125,9 +135,11 @@ export async function resolveByModule(tenant: string, mod: string): Promise<Devi
 
   try {
     const { rows } = await pool.query(
-      `SELECT hw_id, tenant, module, claimed_by, claimed_at
-       FROM device_identities
-       WHERE tenant = $1 AND module = $2
+      `SELECT d.hw_id, d.tenant, d.module, d.claimed_by, d.claimed_at,
+              m.name AS module_name, m.retired_at AS module_retired_at
+       FROM device_identities d
+       LEFT JOIN modules m ON m.tenant = d.tenant AND m.id = d.module
+       WHERE d.tenant = $1 AND d.module = $2
        LIMIT 1`,
       [tenant, mod],
     );
@@ -143,6 +155,8 @@ export async function resolveByModule(tenant: string, mod: string): Promise<Devi
       module: string;
       claimed_by: string | null;
       claimed_at: string | Date;
+      module_name: string | null;
+      module_retired_at: string | Date | null;
     };
 
     const identity: DeviceIdentity = {
@@ -151,6 +165,8 @@ export async function resolveByModule(tenant: string, mod: string): Promise<Devi
       module: row.module,
       claimedBy: row.claimed_by,
       claimedAt: row.claimed_at instanceof Date ? row.claimed_at : new Date(row.claimed_at),
+      moduleName: row.module_name,
+      moduleRetired: row.module_retired_at != null,
     };
 
     cacheByModule.set(key, { hwId: identity.hwId, identity, expiresAt: now + TTL_MS });

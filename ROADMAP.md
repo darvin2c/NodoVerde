@@ -80,6 +80,9 @@ status: vigente
 | Wokwi (test de firmware en CI) | Firmware ESPHome real en Fase 5 |
 | Radio campo: LoRa/celular + ChirpStack | Piloto de hardware real |
 | Auth/aislamiento multi-tenant | Segunda finca real |
+| Generalizar módulo por `system_type` (hidroponía/suelo/ganado): perfil de variables, catálogo de devices y física del sim por tipo; `modules.system_type` + perfiles por tipo | Primera unidad no-hidropónica real o segunda finca con producción mixta |
+| Multi-nodo por módulo (relajar `one_hardware_per_module` a "un fierro por rol") | Junto con `system_type` — un corral/lote puede necesitar varios nodos |
+| Crear/editar fincas (tenants) desde PWA + derivación lat/lon → tz (tz-lookup, offline) y zona (reverse geocoding, online) | Trigger multi-tenant: segunda finca real (el dato `tenants.name` ya existe) |
 | Tauri desktop | Notificaciones nativas / tray / autostart / offline real |
 | Fachada OpenAPI pública | Primera integración externa |
 | NATS | Eliminado. Solo evidencia de que MQTT no basta lo resucita |

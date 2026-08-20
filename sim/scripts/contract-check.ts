@@ -1,9 +1,9 @@
 // Contract test nivel 2: captura mensajes vivos del broker y los valida
 // contra los schemas de contract/asyncapi.yaml. Uso: pnpm contract [segundos]
-// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.7.0):
+// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.8.0):
 //   - dispositivo (4-5 seg) — terra/{hw_id}/{device}/{metric}/reading|event|status|confidence, request, cmd (Fase 3)
 //   - interno (5-6 seg)     — terra/{tenant}/{module}/{device}/{metric}/reading|event|status|confidence, request/cmd
-//   - plataforma (4 seg)    — terra/{tenant}/{module}/confidence|health|alert (servicios de dominio DIRECTO, sin hw_id)
+//   - plataforma (4 seg)    — terra/{tenant}/{module}/confidence|health|alert|meta (servicios de dominio DIRECTO, sin hw_id)
 import mqtt from "mqtt";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
@@ -35,6 +35,7 @@ function schemaFor(topic: string): string | null {
     if (kind === "confidence") return "Confidence";
     if (kind === "health") return "Health";
     if (kind === "alert") return "Alert";
+    if (kind === "meta") return "ModuleMeta"; // ADR-0022 eventos de dominio de módulo
     return null;
   }
   // plano dispositivo — 5 segmentos (o interno cmd 5-seg)
@@ -143,5 +144,5 @@ setTimeout(() => {
     for (const e of errors.slice(0, 20)) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.7.0");
+  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.8.0");
 }, seconds * 1000);

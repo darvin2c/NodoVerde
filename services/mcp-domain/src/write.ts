@@ -290,3 +290,140 @@ export async function listInvariantAlertsDb(
   // defensivo: si detail es string JSON, parsear al evaluar pero guardar original
   return filterInvariantAlerts(alertRows, resolutions, !!onlyOpen);
 }
+
+// ---------------------------------------------------------------------------
+// Módulos — provisionamiento gobernado (ADR-0022)
+// modules.name = identificación humana; modules.retired_at = retiro (nada se borra).
+// Reglas duras aquí (código, jamás en skill):
+//  - cultivo y retiro bloqueados si el módulo está en la campaña abierta (ADR-0021)
+//  - id técnico mod-N autogenerado (max+1, nunca reutiliza ids de retirados)
+// ---------------------------------------------------------------------------
+
+export type ModuleRow = {
+  tenant: string;
+  id: string;
+  name: string | null;
+  crop: string;
+  retired_at: Date | null;
+  created_at: Date;
+};
+
+const HW_ID_RE = /^[0-9a-f]{12}$/;
+
+/** hw_id = 12 hex minúsculas (MAC sin dos puntos) — mismo formato que el router (ADR-0015). */
+export function isValidHwId(hwId: string): boolean {
+  return HW_ID_RE.test(hwId);
+}
+
+/** Siguiente id técnico: max(mod-N)+1 sobre TODOS los ids del tenant (retirados incluidos — un id jamás se reutiliza). */
+export function nextModuleId(existingIds: string[]): string {
+  let max = 0;
+  for (const id of existingIds) {
+    const m = /^mod-(\d+)$/.exec(id);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `mod-${max + 1}`;
+}
+
+/** true si el módulo está en la lista congelada de una campaña (campaigns.modules = JSONB array de ids). */
+export function moduleInCampaign(campaignModules: unknown, moduleId: string): boolean {
+  try {
+    const arr = typeof campaignModules === "string" ? JSON.parse(campaignModules) : campaignModules;
+    return Array.isArray(arr) && arr.includes(moduleId);
+  } catch {
+    return false;
+  }
+}
+
+export async function getModuleDb(tenant: string, id: string): Promise<ModuleRow | null> {
+  const r = await writePool.query(
+    `SELECT tenant, id, name, crop, retired_at, created_at FROM modules WHERE tenant = $1 AND id = $2`,
+    [tenant, id],
+  );
+  return (r.rows[0] as ModuleRow) ?? null;
+}
+
+export async function listModuleIdsDb(tenant: string): Promise<string[]> {
+  const r = await writePool.query(`SELECT id FROM modules WHERE tenant = $1`, [tenant]);
+  return r.rows.map((row: { id: string }) => row.id);
+}
+
+/** Campaña abierta que incluye al módulo, o null. Congelamiento ADR-0021. */
+export async function getOpenCampaignWithModuleDb(tenant: string, moduleId: string): Promise<CampaignRow | null> {
+  const r = await writePool.query(
+    `SELECT id, tenant, crop, modules, profile_hash, memory_hash, memory_hash_close, note, opened_at, closed_at, state
+     FROM campaigns WHERE tenant = $1 AND state = 'open' AND modules ? $2 LIMIT 1`,
+    [tenant, moduleId],
+  );
+  return (r.rows[0] as CampaignRow) ?? null;
+}
+
+/** Inserta módulo con id mod-N autogenerado. Reintenta una vez ante race de creación concurrente. */
+export async function insertModuleDb(tenant: string, name: string, crop: string): Promise<ModuleRow> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const ids = await listModuleIdsDb(tenant);
+    const id = nextModuleId(ids);
+    try {
+      const r = await writePool.query(
+        `INSERT INTO modules (tenant, id, name, crop) VALUES ($1, $2, $3, $4)
+         RETURNING tenant, id, name, crop, retired_at, created_at`,
+        [tenant, id, name, crop],
+      );
+      return r.rows[0] as ModuleRow;
+    } catch (err) {
+      // Race: otro cliente tomó el mismo mod-N entre el SELECT y el INSERT → recalcular una vez
+      if (attempt === 0 && (err as { code?: string }).code === "23505") continue;
+      throw err;
+    }
+  }
+  throw new Error("insertModuleDb: unreachable");
+}
+
+export async function updateModuleDb(
+  tenant: string,
+  id: string,
+  fields: { name?: string; crop?: string },
+): Promise<ModuleRow | null> {
+  const sets: string[] = [];
+  const params: unknown[] = [tenant, id];
+  if (fields.name !== undefined) {
+    params.push(fields.name);
+    sets.push(`name = $${params.length}`);
+  }
+  if (fields.crop !== undefined) {
+    params.push(fields.crop);
+    sets.push(`crop = $${params.length}`);
+  }
+  if (sets.length === 0) return getModuleDb(tenant, id);
+  const r = await writePool.query(
+    `UPDATE modules SET ${sets.join(", ")} WHERE tenant = $1 AND id = $2
+     RETURNING tenant, id, name, crop, retired_at, created_at`,
+    params,
+  );
+  return (r.rows[0] as ModuleRow) ?? null;
+}
+
+/** Retiro gobernado: UPDATE solo si aún activo. Retorna null si ya estaba retirado o no existe. */
+export async function retireModuleDb(tenant: string, id: string): Promise<ModuleRow | null> {
+  const r = await writePool.query(
+    `UPDATE modules SET retired_at = now() WHERE tenant = $1 AND id = $2 AND retired_at IS NULL
+     RETURNING tenant, id, name, crop, retired_at, created_at`,
+    [tenant, id],
+  );
+  return (r.rows[0] as ModuleRow) ?? null;
+}
+
+/** Claiming (ADR-0015): vincula hw_id a módulo. Retorna false si el hw_id ya estaba claimeado. */
+export async function claimDeviceDb(
+  hwId: string,
+  tenant: string,
+  moduleId: string,
+  claimedBy: string,
+): Promise<boolean> {
+  const r = await writePool.query(
+    `INSERT INTO device_identities (hw_id, tenant, module, claimed_by) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (hw_id) DO NOTHING RETURNING hw_id`,
+    [hwId, tenant, moduleId, claimedBy],
+  );
+  return r.rows.length > 0;
+}

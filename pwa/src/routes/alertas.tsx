@@ -33,6 +33,13 @@ export function AlertasPage() {
     refetchInterval: 15000
   });
 
+  // Nombres humanos de módulos (ADR-0022)
+  const { data: modulesList } = useQuery({
+    queryKey: ["modules.list"],
+    queryFn: () => trpc.modules.list.query()
+  });
+  const moduleNames = new Map((modulesList ?? []).map((m) => [m.id, m.name ?? m.id]));
+
   const resolveMut = useMutation({
     mutationFn: (a: AlertRow) => {
       const detail = (a.detail && typeof a.detail === "object" ? a.detail : {}) as Record<string, unknown>;
@@ -106,7 +113,7 @@ export function AlertasPage() {
                         <p className="font-medium">{rem.title}</p>
                         <p className="text-xs text-muted-foreground">{a.name}</p>
                       </TableCell>
-                      <TableCell className="font-mono text-xs">{a.module}</TableCell>
+                      <TableCell className="font-mono text-xs" title={a.module}>{moduleNames.get(a.module) ?? a.module}</TableCell>
                       <TableCell className="font-mono text-xs">{a.device ?? "—"}</TableCell>
                       <TableCell className="text-xs text-muted-foreground" title={formatDateTime(a.time)}>{timeAgo(a.time)}</TableCell>
                       <TableCell>

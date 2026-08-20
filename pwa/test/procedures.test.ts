@@ -101,3 +101,47 @@ describe("cameras.lastPhoto y pending.alerts vacíos", () => {
     expect(res).toEqual([]);
   });
 });
+
+// — Provisionamiento de módulos (ADR-0022): la PWA delega SIEMPRE al MCP de dominio —
+const domainCalls: Array<{ tool: string; args: unknown }> = [];
+vi.mock("../server/mcpDomain.js", () => ({
+  resolveAlert: vi.fn(),
+  createModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "create_module", args }); return { module: { tenant: "demo", id: "mod-5", name: "Mesa Prueba", crop: "lechuga" } }; }),
+  updateModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "update_module", args }); return { module: { id: "mod-1", name: "Mesa Nueva" } }; }),
+  retireModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "retire_module", args }); return { module: { id: "mod-1", retired_at: "2026-08-20" } }; }),
+  claimDevice: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "claim_device", args }); return { hw_id: "020000000005" }; })
+}));
+
+describe("modules mutations — delegación gobernada al MCP", () => {
+  it("create pasa tenant/name/crop al MCP y devuelve el módulo creado", async () => {
+    const caller = callerWith(mockDb());
+    const res = await caller.modules.create({ tenant: "demo", name: "Mesa Prueba", crop: "lechuga" }) as { module: { id: string } };
+    expect(res.module.id).toBe("mod-5");
+    expect(domainCalls.at(-1)).toEqual({ tool: "create_module", args: { tenant: "demo", name: "Mesa Prueba", crop: "lechuga" } });
+  });
+
+  it("update pasa rename al MCP", async () => {
+    const caller = callerWith(mockDb());
+    await caller.modules.update({ tenant: "demo", module: "mod-1", name: "Mesa Nueva" });
+    expect(domainCalls.at(-1)).toEqual({ tool: "update_module", args: { tenant: "demo", module: "mod-1", name: "Mesa Nueva" } });
+  });
+
+  it("retire pasa el módulo al MCP", async () => {
+    const caller = callerWith(mockDb());
+    await caller.modules.retire({ tenant: "demo", module: "mod-1" });
+    expect(domainCalls.at(-1)).toEqual({ tool: "retire_module", args: { tenant: "demo", module: "mod-1" } });
+  });
+
+  it("claim acepta hw_id válido y lo marca claimed_by=pwa", async () => {
+    const caller = callerWith(mockDb());
+    await caller.modules.claim({ tenant: "demo", module: "mod-5", hw_id: "020000000005" });
+    expect(domainCalls.at(-1)).toEqual({ tool: "claim_device", args: { tenant: "demo", module: "mod-5", hw_id: "020000000005", claimed_by: "pwa" } });
+  });
+
+  it("claim rechaza hw_id mal formado ANTES de llamar al MCP", async () => {
+    const caller = callerWith(mockDb());
+    const before = domainCalls.length;
+    await expect(caller.modules.claim({ tenant: "demo", module: "mod-5", hw_id: "XYZ" })).rejects.toThrow();
+    expect(domainCalls.length).toBe(before); // nunca llegó al dominio
+  });
+});

@@ -7,7 +7,7 @@ import { getDb, type TerraDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
-import { resolveAlert } from "./mcpDomain.js";
+import { resolveAlert, createModule, updateModule, retireModule, claimDevice } from "./mcpDomain.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -112,11 +112,11 @@ export const appRouter = t.router({
     list: t.procedure.query(async ({ ctx }) => {
       try {
         const res = await rawDb(ctx.db).execute(
-          sql`SELECT m.tenant, m.id, m.crop, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max
+          sql`SELECT m.tenant, m.id, m.name, m.crop, m.retired_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max
               FROM modules m LEFT JOIN crop_profiles c ON c.name = m.crop ORDER BY m.tenant, m.id`
         );
         return res.rows as Array<{
-          tenant: string; id: string; crop: string;
+          tenant: string; id: string; name: string | null; crop: string; retired_at: string | null;
           ec_min: number | null; ec_max: number | null;
           ph_min: number | null; ph_max: number | null;
         }>;
@@ -125,6 +125,56 @@ export const appRouter = t.router({
       }
     }),
 
+    // Catálogo de cultivos para el formulario de nuevo módulo
+    crops: t.procedure.query(async ({ ctx }) => {
+      try {
+        const res = await rawDb(ctx.db).execute(
+          sql`SELECT name FROM crop_profiles ORDER BY name`
+        );
+        return (res.rows as Array<{ name: string }>).map((r) => r.name);
+      } catch {
+        return [];
+      }
+    }),
+
+    // — Escrituras gobernadas vía MCP dominio (ADR-0022) —
+    create: t.procedure
+      .input(z.object({
+        tenant: z.string().default("demo"),
+        name: z.string().min(1),
+        crop: z.string().min(1)
+      }))
+      .mutation(async ({ input }) => {
+        return createModule(input);
+      }),
+
+    update: t.procedure
+      .input(z.object({
+        tenant: z.string().default("demo"),
+        module: z.string().min(1),
+        name: z.string().min(1).optional(),
+        crop: z.string().min(1).optional()
+      }))
+      .mutation(async ({ input }) => {
+        return updateModule(input);
+      }),
+
+    retire: t.procedure
+      .input(z.object({ tenant: z.string().default("demo"), module: z.string().min(1) }))
+      .mutation(async ({ input }) => {
+        return retireModule(input);
+      }),
+
+    claim: t.procedure
+      .input(z.object({
+        tenant: z.string().default("demo"),
+        module: z.string().min(1),
+        hw_id: z.string().regex(/^[0-9a-f]{12}$/, "12 hex minúsculas")
+      }))
+      .mutation(async ({ input }) => {
+        return claimDevice({ ...input, claimed_by: "pwa" });
+      }),
+
     // Detalle de un módulo: ficha + perfil de cultivo + últimas lecturas + alertas recientes del módulo
     detail: t.procedure
       .input(z.object({ tenant: z.string().default("demo"), id: z.string().min(1) }))
@@ -132,12 +182,19 @@ export const appRouter = t.router({
         const db = rawDb(ctx.db);
         try {
           const modRes = await db.execute(
-            sql`SELECT m.tenant, m.id, m.crop, m.created_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max, c.notes AS crop_notes
+            sql`SELECT m.tenant, m.id, m.name, m.crop, m.retired_at, m.created_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max, c.notes AS crop_notes
                 FROM modules m LEFT JOIN crop_profiles c ON c.name = m.crop
                 WHERE m.tenant = ${input.tenant} AND m.id = ${input.id}`
           );
           const module = (modRes.rows[0] as Record<string, unknown> | undefined) ?? null;
           if (!module) return null;
+
+          // Fierro vinculado (claiming ADR-0015) — null honesto si el módulo no tiene hardware
+          const hwRes = await db.execute(
+            sql`SELECT hw_id, claimed_by, claimed_at FROM device_identities
+                WHERE tenant = ${input.tenant} AND module = ${input.id} LIMIT 1`
+          );
+          const hardware = (hwRes.rows[0] as { hw_id: string; claimed_by: string | null; claimed_at: string } | undefined) ?? null;
 
           const readingsRes = await db.execute(
             sql`SELECT DISTINCT ON (metric) device, metric, value, time
@@ -166,6 +223,7 @@ export const appRouter = t.router({
 
           return {
             module,
+            hardware,
             readings: readingsRes.rows as Array<{ device: string; metric: string; value: number | null; time: string }>,
             alerts: alertsRes.rows as Array<{ time: string; name: string; severity: string; device: string | null; detail: string | null; open: boolean }>,
             confidence,

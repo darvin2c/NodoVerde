@@ -25,7 +25,7 @@ import {
   buildAlertPayload,
   buildAlertTopic,
 } from "./cmdAlert.js";
-import { resolveByHwId, resolveByModule, closePool } from "./db.js";
+import { resolveByHwId, resolveByModule, clearCache, closePool } from "./db.js";
 import { buildDiscoveryConfigs } from "./discovery.js";
 
 const MQTT_URL = process.env.MQTT_URL ?? "mqtt://localhost:1883";
@@ -40,6 +40,8 @@ const DEVICE_SUBS = [
 
 const INTERNAL_SUB = "terra/+/+/+/request/#";
 const INTERNAL_CMD_SUB = "terra/+/+/+/cmd";
+// Plano plataforma 4-seg (contrato v0.8.0): eventos de dominio de módulos (ADR-0022)
+const META_SUB = "terra/+/+/meta";
 
 // Estado de discovery publicado por hw_id (para detectar re-asignación)
 const discoveryPublished = new Map<string, string>(); // hw_id → "tenant/module"
@@ -77,6 +79,11 @@ client.on("connect", () => {
     if (err) console.error(`[router] error subscribing ${INTERNAL_CMD_SUB}`, err);
     else console.log(`[router] suscrito ${INTERNAL_CMD_SUB}`);
   });
+
+  client.subscribe(META_SUB, { qos: 1 }, (err) => {
+    if (err) console.error(`[router] error subscribing ${META_SUB}`, err);
+    else console.log(`[router] suscrito ${META_SUB}`);
+  });
 });
 
 client.on("reconnect", () => {
@@ -113,6 +120,13 @@ function publish(topic: string, payload: Buffer, opts: { qos: 0 | 1; retain: boo
 // ---------------------------------------------------------------------------
 
 client.on("message", async (topic: string, payload: Buffer) => {
+  // 0) ¿Evento meta de módulo? (plano plataforma 4-seg, contrato v0.8.0)
+  const metaMatch = /^terra\/([^/]+)\/([^/]+)\/meta$/.exec(topic);
+  if (metaMatch) {
+    await handleModuleMeta(metaMatch[1], metaMatch[2], payload);
+    return;
+  }
+
   // 1) ¿Es plano dispositivo? (5 seg, hw_id)
   const deviceParsed = parseDeviceTopic(topic);
   if (deviceParsed) {
@@ -138,6 +152,46 @@ client.on("message", async (topic: string, payload: Buffer) => {
 });
 
 // ---------------------------------------------------------------------------
+// Eventos meta de módulo (ADR-0022) — refresh de discovery sin reinicio
+// ---------------------------------------------------------------------------
+
+/**
+ * Reacciona a module_created/updated/retired/claimed publicados por mcp-domain.
+ * Limpia el cache de identidad y:
+ *  - retired → borra las entidades HA del módulo (payload vacío retenido)
+ *  - resto   → republica discovery con el nombre fresco si el módulo tiene fierro
+ */
+async function handleModuleMeta(tenant: string, mod: string, payload: Buffer): Promise<void> {
+  let event: string;
+  try {
+    event = (JSON.parse(payload.toString()) as { event?: string }).event ?? "";
+  } catch {
+    console.warn(`[router] meta payload inválido en terra/${tenant}/${mod}/meta — ignorado`);
+    return;
+  }
+
+  clearCache();
+  const key = `${tenant}/${mod}`;
+
+  if (event === "module_retired") {
+    for (const [hwId, k] of discoveryPublished) {
+      if (k === key) discoveryPublished.delete(hwId);
+    }
+    console.log(`[router] módulo retirado ${key} — borrando entidades HA`);
+    await unpublishDiscovery(tenant, mod);
+    return;
+  }
+
+  // Republicar solo si el módulo tiene fierro claimeado; si no, el discovery
+  // llegará solo cuando su fierro hable por primera vez (handleDeviceMessage)
+  const identity = await resolveByModule(tenant, mod);
+  if (!identity || identity.moduleRetired) return;
+  discoveryPublished.set(identity.hwId, key);
+  console.log(`[router] meta ${event} ${key} — republicando discovery (nombre: ${identity.moduleName ?? mod})`);
+  await publishDiscovery(tenant, mod, identity.moduleName);
+}
+
+// ---------------------------------------------------------------------------
 // device → interno
 // ---------------------------------------------------------------------------
 
@@ -157,6 +211,12 @@ async function handleDeviceMessage(
   const identity = await resolveByHwId(hwId);
   if (!identity) {
     console.warn(`[router] hw_id desconocido ${hwId} — descartando ${topic}`);
+    return;
+  }
+
+  // Módulo retirado (ADR-0022): no acepta telemetría — la historia queda, el presente no
+  if (identity.moduleRetired) {
+    console.warn(`[router] módulo retirado ${identity.tenant}/${identity.module} — descartando ${topic}`);
     return;
   }
 
@@ -189,12 +249,12 @@ async function handleDeviceMessage(
     } else {
       console.log(`[router] hw_id ${hwId} resuelto ${key} — publicando HA discovery`);
     }
-    await publishDiscovery(identity.tenant, identity.module);
+    await publishDiscovery(identity.tenant, identity.module, identity.moduleName);
   }
 }
 
-async function publishDiscovery(tenant: string, mod: string): Promise<void> {
-  const configs = buildDiscoveryConfigs(tenant, mod);
+async function publishDiscovery(tenant: string, mod: string, moduleName?: string | null): Promise<void> {
+  const configs = buildDiscoveryConfigs(tenant, mod, moduleName);
   for (const { topic, payload } of configs) {
     const msg = Buffer.from(JSON.stringify(payload));
     try {
@@ -202,6 +262,19 @@ async function publishDiscovery(tenant: string, mod: string): Promise<void> {
       console.log(`[router] discovery ${topic}`);
     } catch (err) {
       console.error(`[router] error discovery ${topic}`, err);
+    }
+  }
+}
+
+/** Borra las entidades HA de un módulo: payload vacío retenido = HA elimina la config. */
+async function unpublishDiscovery(tenant: string, mod: string): Promise<void> {
+  const configs = buildDiscoveryConfigs(tenant, mod);
+  for (const { topic } of configs) {
+    try {
+      await publish(topic, Buffer.alloc(0), { qos: 1, retain: true });
+      console.log(`[router] discovery retirado ${topic}`);
+    } catch (err) {
+      console.error(`[router] error retirando discovery ${topic}`, err);
     }
   }
 }

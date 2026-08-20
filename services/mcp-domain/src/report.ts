@@ -69,6 +69,8 @@ export type StatsEntry = { min: number; avg: number; max: number; count: number 
 export type ModuleReport = {
   tenant: string;
   module: string;
+  /** Nombre humano del módulo (ADR-0022); null si sin nombre */
+  name: string | null;
   crop: string;
   latest: Record<string, LatestEntry>;
   missing: string[];
@@ -99,7 +101,7 @@ export type DailyReportData = {
 export type BuildInput = {
   date: string; // YYYY-MM-DD
   farm?: FarmInfo;
-  modules: { tenant: string; id: string; crop: string }[];
+  modules: { tenant: string; id: string; name?: string | null; crop: string; retired?: boolean }[];
   profiles: Map<string, CropProfile>;
   telemetry: TelemetryRow[];
   confidence: Map<string, ConfidenceEntry>; // key: "tenant/module" o "module"
@@ -227,6 +229,7 @@ export function buildDailyReportData(input: BuildInput): DailyReportData {
     result.push({
       tenant: mod.tenant,
       module: mod.id,
+      name: mod.name ?? null,
       crop: mod.crop,
       latest,
       missing,

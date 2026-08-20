@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { appRouter } from "../server/trpc.js";
 
 function mockDb(rows: unknown[] = []) {
-  return { execute: vi.fn().mockResolvedValue({ rows }) } as unknown as never;
+  return { execute: vi.fn().mockResolvedValue({ rows }) };
 }
 
 function callerWith(db: unknown) {
@@ -84,7 +84,8 @@ describe("modules.detail", () => {
   it("ensambla ficha + lecturas + alertas cuando existe", async () => {
     const db = {
       execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [{ tenant: "demo", id: "mod-1", crop: "lechuga", ec_min: 1.2, ec_max: 1.8 }] })
+        .mockResolvedValueOnce({ rows: [{ tenant: "demo", id: "mod-1", name: "Mesa Norte", crop: "lechuga", retired_at: null, ec_min: 1.2, ec_max: 1.8 }] })
+        .mockResolvedValueOnce({ rows: [{ hw_id: "020000000001", claimed_by: "seed", claimed_at: "2026-08-15T00:00:00Z" }] })
         .mockResolvedValueOnce({ rows: [{ device: "ec-01", metric: "ec", value: 1.4, time: "2026-08-19T10:00:00Z" }] })
         .mockResolvedValueOnce({ rows: [{ time: "t", name: "device_silence", severity: "warn", device: "ec-01", detail: null, open: true }] })
     };
@@ -93,7 +94,7 @@ describe("modules.detail", () => {
     expect(detail).not.toBeNull();
     expect(detail!.readings[0].metric).toBe("ec");
     expect(detail!.alerts[0].open).toBe(true);
-    expect(db.execute).toHaveBeenCalledTimes(3);
+    expect(db.execute).toHaveBeenCalledTimes(4);
   });
 });
 

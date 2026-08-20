@@ -22,9 +22,15 @@ export function OverviewPage() {
   });
   const { data: openAlerts } = useQuery({
     queryKey: ["alerts.list", "open"],
-    queryFn: () => trpc.alerts.list.query({ tenant: "demo", limit: 5, onlyOpen: true }),
+    queryFn: () => trpc.alerts.list.query({ tenant: "demo", limit: 6, onlyOpen: true }),
     refetchInterval: 15000
   });
+  // Nombres humanos de módulos (ADR-0022) para las tarjetas en vivo
+  const { data: modulesList } = useQuery({
+    queryKey: ["modules.list"],
+    queryFn: () => trpc.modules.list.query()
+  });
+  const moduleNames = new Map((modulesList ?? []).map((m) => [`${m.tenant}/${m.id}`, m.name ?? m.id]));
   const live = useLiveModules();
 
   if (isLoading) {
@@ -132,9 +138,9 @@ export function OverviewPage() {
                 <Link key={key} to="/modulos/$moduleId" params={{ moduleId: mod }}
                   className="flex items-center justify-between gap-3 rounded-lg border p-3 hover:bg-accent/50 transition-colors">
                   <div className="min-w-0">
-                    <p className="text-sm font-medium">{mod}</p>
+                    <p className="text-sm font-medium">{moduleNames.get(key) ?? mod}</p>
                     <p className="text-xs text-muted-foreground">
-                      confianza {conf ? `${Math.round(conf.v)}%` : "—"}
+                      {mod} · confianza {conf ? `${Math.round(conf.v)}%` : "—"}
                     </p>
                   </div>
                   <Badge variant={healthVariant(h.state)}>{h.state}</Badge>

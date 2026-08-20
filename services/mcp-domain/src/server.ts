@@ -25,7 +25,15 @@ import {
   insertCampaignDb,
   closeCampaignDb,
   insertResolutionDb,
+  isValidHwId,
+  getModuleDb,
+  getOpenCampaignWithModuleDb,
+  insertModuleDb,
+  updateModuleDb,
+  retireModuleDb,
+  claimDeviceDb,
 } from "./write.js";
+import { publishModuleMeta } from "./bus.js";
 
 function summaryText(obj: unknown, maxLen = 4000): string {
   const s = JSON.stringify(obj, null, 2);
@@ -97,7 +105,7 @@ export function createMcpServer(): McpServer {
         tenant: farm.tenant,
         farm_name: farm.name,
         location: { name: farm.location_name, lat: farm.lat, lon: farm.lon, tz: farm.tz },
-        modules: modules.map((m) => ({ id: m.id, crop: m.crop })),
+        modules: modules.map((m) => ({ id: m.id, name: m.name, crop: m.crop, retired: m.retired_at !== null })),
         missing,
       };
       const text = `Finca ${farm.name} (${farm.tenant})` + (missing.length ? ` — campos ausentes: ${missing.join(", ")}` : "");
@@ -274,7 +282,7 @@ export function createMcpServer(): McpServer {
         farm: farm
           ? { tenant: farm.tenant, name: farm.name, location_name: farm.location_name, lat: farm.lat, lon: farm.lon, tz: farm.tz }
           : null,
-        modules: modules.map((m) => ({ tenant: m.tenant, id: m.id, crop: m.crop })),
+        modules: modules.map((m) => ({ tenant: m.tenant, id: m.id, name: m.name, crop: m.crop, retired: m.retired_at !== null })),
         profiles,
         telemetry: telemetry.map((r) => ({
           tenant: r.tenant,
@@ -335,7 +343,8 @@ export function createMcpServer(): McpServer {
         };
       }
       const mods = await listModulesDb(tenant);
-      const filtered = mods.filter((m) => m.crop === crop).map((m) => m.id);
+      // Módulos retirados no entran en campañas nuevas (ADR-0022)
+      const filtered = mods.filter((m) => m.crop === crop && m.retired_at === null).map((m) => m.id);
       const profileHash = computeProfileHash(profile as Record<string, unknown>);
       const memoryHash = await computeMemoryHash(crop);
       try {
@@ -476,6 +485,203 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text: `${text}\n${summaryText(rows)}` }],
         structuredContent: { tenant, only_open: !!only_open, alerts: rows } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — create_module ----------------------------------------------------------
+  server.registerTool(
+    "create_module",
+    {
+      title: "Crear módulo",
+      description:
+        "Crea un módulo (unidad lógica de cultivo, ADR-0022) con id técnico autogenerado mod-N y nombre humano libre. Valida que el cultivo existe en crop_profiles. Nace sin fierro: vincular luego con claim_device.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        name: z.string().min(1).describe("Nombre humano del módulo (ej: 'Mesa Norte')"),
+        crop: z.string().describe("Cultivo (crop_profiles.name)"),
+      },
+    },
+    async ({ tenant, name, crop }) => {
+      const profile = await getCropProfileDb(crop);
+      if (!profile) {
+        return {
+          content: [{ type: "text", text: `crop no existe: ${crop}` }],
+          structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await insertModuleDb(tenant, name, crop);
+      await publishModuleMeta(tenant, row.id, "module_created");
+      return {
+        content: [{ type: "text", text: `Módulo creado ${row.id} "${name}" tenant=${tenant} crop=${crop}\n${summaryText(row)}` }],
+        structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — update_module ----------------------------------------------------------
+  server.registerTool(
+    "update_module",
+    {
+      title: "Actualizar módulo",
+      description:
+        "Renombra un módulo y/o cambia su cultivo. Reglas: módulo retirado no se edita; cambio de cultivo bloqueado si el módulo está en la campaña abierta (congelamiento ADR-0021). Al renombrar, el router refresca el nombre/área en Home Assistant.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        module: z.string().describe("Id técnico del módulo (mod-N)"),
+        name: z.string().min(1).optional().describe("Nuevo nombre humano"),
+        crop: z.string().optional().describe("Nuevo cultivo (crop_profiles.name)"),
+      },
+    },
+    async ({ tenant, module: moduleId, name, crop }) => {
+      const mod = await getModuleDb(tenant, moduleId);
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+          structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (mod.retired_at) {
+        return {
+          content: [{ type: "text", text: `módulo retirado (${mod.retired_at.toISOString()}) — no se edita` }],
+          structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (name === undefined && crop === undefined) {
+        return {
+          content: [{ type: "text", text: "nada que actualizar: pasa name y/o crop" }],
+          structuredContent: { error: "no_fields", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (crop !== undefined) {
+        const profile = await getCropProfileDb(crop);
+        if (!profile) {
+          return {
+            content: [{ type: "text", text: `crop no existe: ${crop}` }],
+            structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
+          };
+        }
+        if (crop !== mod.crop) {
+          const campaign = await getOpenCampaignWithModuleDb(tenant, moduleId);
+          if (campaign) {
+            const text = `cambio de cultivo bloqueado: ${moduleId} está en la campaña abierta ${campaign.id} — cierra la campaña primero`;
+            return {
+              content: [{ type: "text", text }],
+              structuredContent: { error: "module_in_open_campaign", tenant, module: moduleId, campaign_id: campaign.id } as unknown as Record<string, unknown>,
+            };
+          }
+        }
+      }
+      const row = await updateModuleDb(tenant, moduleId, { name, crop });
+      await publishModuleMeta(tenant, moduleId, "module_updated");
+      return {
+        content: [{ type: "text", text: `Módulo ${moduleId} actualizado\n${summaryText(row)}` }],
+        structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — retire_module ----------------------------------------------------------
+  server.registerTool(
+    "retire_module",
+    {
+      title: "Retirar módulo",
+      description:
+        "Retira un módulo (retired_at). NADA se borra (ADR-0011 aplicado a dominio): conserva telemetría, alertas e historia financiera. Deja de aceptar telemetría/claiming y sale de HA. Bloqueado si está en la campaña abierta (ADR-0021).",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        module: z.string().describe("Id técnico del módulo (mod-N)"),
+      },
+    },
+    async ({ tenant, module: moduleId }) => {
+      const mod = await getModuleDb(tenant, moduleId);
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+          structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (mod.retired_at) {
+        return {
+          content: [{ type: "text", text: `módulo ya retirado (${mod.retired_at.toISOString()})` }],
+          structuredContent: { error: "module_already_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      const campaign = await getOpenCampaignWithModuleDb(tenant, moduleId);
+      if (campaign) {
+        const text = `retiro bloqueado: ${moduleId} está en la campaña abierta ${campaign.id} — cierra la campaña primero`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { error: "module_in_open_campaign", tenant, module: moduleId, campaign_id: campaign.id } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await retireModuleDb(tenant, moduleId);
+      await publishModuleMeta(tenant, moduleId, "module_retired");
+      return {
+        content: [{ type: "text", text: `Módulo ${moduleId} retirado\n${summaryText(row)}` }],
+        structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — claim_device -----------------------------------------------------------
+  server.registerTool(
+    "claim_device",
+    {
+      title: "Vincular fierro a módulo",
+      description:
+        "Claiming (ADR-0015/0022): asocia un hw_id (12 hex minúsculas, MAC sin dos puntos) a un módulo activo. Desde ahí el router traduce su telemetría al plano interno y publica su discovery en HA. Un hw_id solo puede claimearse una vez; un módulo acepta UN fierro activo.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        module: z.string().describe("Id técnico del módulo (mod-N)"),
+        hw_id: z.string().describe("Id de fábrica del ESP32: 12 hex minúsculas"),
+        claimed_by: z.string().optional().describe("Quién claimea (default pwa)"),
+      },
+    },
+    async ({ tenant, module: moduleId, hw_id, claimed_by }) => {
+      if (!isValidHwId(hw_id)) {
+        return {
+          content: [{ type: "text", text: `hw_id inválido: "${hw_id}" — se esperan 12 hex minúsculas (ej: 020000000005)` }],
+          structuredContent: { error: "invalid_hw_id", hw_id } as unknown as Record<string, unknown>,
+        };
+      }
+      const mod = await getModuleDb(tenant, moduleId);
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+          structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (mod.retired_at) {
+        return {
+          content: [{ type: "text", text: `módulo retirado — no acepta claiming` }],
+          structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      let claimed: boolean;
+      try {
+        claimed = await claimDeviceDb(hw_id, tenant, moduleId, claimed_by ?? "pwa");
+      } catch (err) {
+        // device_identities_one_hardware_per_module: el módulo ya tiene un fierro activo
+        if ((err as { code?: string }).code === "23505") {
+          return {
+            content: [{ type: "text", text: `módulo ${moduleId} ya tiene un fierro vinculado — un módulo acepta UN hardware activo` }],
+            structuredContent: { error: "module_already_has_hardware", tenant, module: moduleId } as unknown as Record<string, unknown>,
+          };
+        }
+        throw err;
+      }
+      if (!claimed) {
+        return {
+          content: [{ type: "text", text: `hw_id ${hw_id} ya está claimeado — libera el anterior antes de reclaimear` }],
+          structuredContent: { error: "hw_already_claimed", hw_id } as unknown as Record<string, unknown>,
+        };
+      }
+      await publishModuleMeta(tenant, moduleId, "device_claimed");
+      const text = `Fierro ${hw_id} vinculado a ${tenant}/${moduleId}`;
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { hw_id, tenant, module: moduleId } as unknown as Record<string, unknown>,
       };
     },
   );
