@@ -30,7 +30,7 @@ cd sim && pnpm install && pnpm dev       # mundo simulado (ADR-0017): física + 
 # laboratorio: pnpm ctl list | add-node --crop X [--hw H] | remove-node --hw H [--unclaim] | scenario <nombre>
 ```
 
-- HA: http://localhost:8124 (el 8123 del host lo ocupa TerraSmart). Primera vez: onboarding + Settings → Add Integration → MQTT → broker `mosquitto:1883` (HA moderno NO acepta broker en YAML). Incluye gauges de confianza y salud por módulo (discovery del router, contrato v0.6.0). Sus botones publican a `request/` y el portero los valida como a cualquier solicitante (ADR-0009/0020).
+- HA: http://localhost:8124 (el 8123 del host lo ocupa TerraSmart). Primera vez: onboarding + Settings → Add Integration → MQTT → broker `mosquitto:1883` (HA moderno NO acepta broker en YAML). Incluye gauges de confianza y salud por módulo (discovery del router, contrato v0.8.0). Sus botones publican a `request/` y el portero los valida como a cualquier solicitante (ADR-0009/0020).
 - Grafana: http://localhost:3001 (admin/admin), dashboard "Terra Overview" + alertas de umbral (EC/pH/nivel) provisionadas.
 - MCP dominio: http://localhost:7760/mcp — herramientas del cerebro (`daily_report_data`, `latest_readings`, …). Telemetría read-only; Fase 4 (ADR-0021) añade la excepción gobernada `open/close_campaign` + `resolve_alert` (tablas `campaigns`/`alert_resolutions`).
 - Finanzas (read+write): http://localhost:7761/mcp — ledger `movements` (`register_movement`, `void_movement`, `list_movements`, `cost_summary`, `list_supplies`, `set_supply_cost`).

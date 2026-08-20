@@ -8,6 +8,7 @@ import mqtt from "mqtt";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import Ajv, { type ValidateFunction } from "ajv";
+import addFormats from "ajv-formats";
 
 const seconds = parseInt(process.argv[2] ?? "40", 10);
 const brokerUrl = process.env.MQTT_URL ?? "mqtt://localhost:1883";
@@ -15,6 +16,7 @@ const brokerUrl = process.env.MQTT_URL ?? "mqtt://localhost:1883";
 const doc = parse(readFileSync(new URL("../../contract/asyncapi.yaml", import.meta.url), "utf8"));
 const schemas = doc.components.schemas;
 const ajv = new Ajv({ allErrors: true });
+addFormats(ajv);
 const validators: Record<string, ValidateFunction> = {};
 for (const [name, schema] of Object.entries<any>(schemas)) {
   if (name === "deviceMetrics") continue;
@@ -144,5 +146,5 @@ setTimeout(() => {
     for (const e of errors.slice(0, 20)) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.8.0");
+  console.log(`[contract] OK — todo mensaje observado cumple AsyncAPI v${doc.info.version}`);
 }, seconds * 1000);
