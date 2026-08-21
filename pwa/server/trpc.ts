@@ -7,7 +7,7 @@ import { getDb, type TerraDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
-import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant, openBatch, closeBatch } from "./mcpDomain.js";
+import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant, openBatch, closeBatch, createCropProfile, updateCropProfile } from "./mcpDomain.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -211,7 +211,7 @@ export const appRouter = t.router({
             ORDER BY tenant, module, metric, time DESC
           ) lr
           JOIN modules m ON m.tenant = lr.tenant AND m.id = lr.module AND m.retired_at IS NULL
-          JOIN crop_profiles cp ON cp.crop = m.crop
+          LEFT JOIN crop_profiles cp ON cp.name = m.crop
         `);
         for (const r of res.rows as Array<{
           tenant: string; module: string; metric: string; value: number | null;
@@ -222,7 +222,9 @@ export const appRouter = t.router({
           if (r.metric === "ec" || r.metric === "ph") {
             const min = r.metric === "ec" ? r.ec_min : r.ph_min;
             const max = r.metric === "ec" ? r.ec_max : r.ph_max;
-            const out = min != null && max != null && (r.value < min || r.value > max);
+            // ADR-0025: mesa libre (sin lote → sin rangos) no se juzga — honesto, no "ok" falso
+            if (min == null || max == null) continue;
+            const out = r.value < min || r.value > max;
             const cur = acc[r.metric];
             // Gana el módulo fuera de rango; entre sanos, el primero
             if (!cur || (out && cur.status === "ok")) {
@@ -320,21 +322,32 @@ export const appRouter = t.router({
   modules: t.router({
     list: t.procedure.query(async ({ ctx }) => {
       try {
+        // ADR-0025: crop es caché del lote (null = libre); la ocupación se lee
+        // del LOTE abierto que contiene al módulo, no del caché.
         const res = await rawDb(ctx.db).execute(
-          sql`SELECT m.tenant, m.id, m.name, m.crop, m.retired_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max
-              FROM modules m LEFT JOIN crop_profiles c ON c.name = m.crop ORDER BY m.tenant, m.id`
+          sql`SELECT m.tenant, m.id, m.name, m.crop, m.retired_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max,
+                     l.code AS occupied_by, l.crop AS lote_crop
+              FROM modules m
+              LEFT JOIN crop_profiles c ON c.name = m.crop
+              LEFT JOIN LATERAL (
+                SELECT lo.code, lo.crop FROM lotes lo
+                WHERE lo.tenant = m.tenant AND lo.state = 'open' AND lo.modules ? m.id
+                ORDER BY lo.started_at DESC LIMIT 1
+              ) l ON true
+              ORDER BY m.tenant, m.id`
         );
         return res.rows as Array<{
-          tenant: string; id: string; name: string | null; crop: string; retired_at: string | null;
+          tenant: string; id: string; name: string | null; crop: string | null; retired_at: string | null;
           ec_min: number | null; ec_max: number | null;
           ph_min: number | null; ph_max: number | null;
+          occupied_by: string | null; lote_crop: string | null;
         }>;
       } catch {
         return [];
       }
     }),
 
-    // Catálogo de cultivos para el formulario de nuevo módulo
+    // Catálogo de cultivos (para abrir lote y página de perfiles)
     crops: t.procedure.query(async ({ ctx }) => {
       try {
         const res = await rawDb(ctx.db).execute(
@@ -346,12 +359,11 @@ export const appRouter = t.router({
       }
     }),
 
-    // — Escrituras gobernadas vía MCP dominio (ADR-0022) —
+    // — Escrituras gobernadas vía MCP dominio (ADR-0022/0025) —
     create: t.procedure
       .input(z.object({
         tenant: z.string().default("demo"),
-        name: z.string().min(1),
-        crop: z.string().min(1)
+        name: z.string().min(1)
       }))
       .mutation(async ({ input }) => {
         return createModule(input);
@@ -361,8 +373,7 @@ export const appRouter = t.router({
       .input(z.object({
         tenant: z.string().default("demo"),
         module: z.string().min(1),
-        name: z.string().min(1).optional(),
-        crop: z.string().min(1).optional()
+        name: z.string().min(1)
       }))
       .mutation(async ({ input }) => {
         return updateModule(input);
@@ -471,6 +482,47 @@ export const appRouter = t.router({
         return () => { mqttBus.off("health", handler); };
       });
     })
+  }),
+
+  // ── PERFILES DE CULTIVO (ADR-0025): el catálogo biológico. Lectura directa;
+  // escritura SOLO vía MCP gobernado (regla 9: el humano crea/edita, el LLM jamás) ──
+  profiles: t.router({
+    list: t.procedure.query(async ({ ctx }) => {
+      try {
+        const res = await rawDb(ctx.db).execute(
+          sql`SELECT name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes
+              FROM crop_profiles ORDER BY name`
+        );
+        return res.rows as Array<{
+          name: string; ec_min: number; ec_max: number; ph_min: number; ph_max: number;
+          water_temp_min: number; water_temp_max: number; cycle_days: number | null; notes: string | null;
+        }>;
+      } catch {
+        return [];
+      }
+    }),
+
+    create: t.procedure
+      .input(z.object({
+        name: z.string().regex(/^[a-z][a-z0-9_]{1,31}$/, "slug minúscula: especie o especie_variedad"),
+        ec_min: z.number(), ec_max: z.number(),
+        ph_min: z.number(), ph_max: z.number(),
+        water_temp_min: z.number(), water_temp_max: z.number(),
+        cycle_days: z.number().int().positive().optional(),
+        notes: z.string().optional()
+      }))
+      .mutation(async ({ input }) => createCropProfile(input)),
+
+    update: t.procedure
+      .input(z.object({
+        name: z.string().min(1),
+        ec_min: z.number().optional(), ec_max: z.number().optional(),
+        ph_min: z.number().optional(), ph_max: z.number().optional(),
+        water_temp_min: z.number().optional(), water_temp_max: z.number().optional(),
+        cycle_days: z.number().int().positive().nullable().optional(),
+        notes: z.string().nullable().optional()
+      }))
+      .mutation(async ({ input }) => updateCropProfile(input))
   }),
 
   // ── CAMPO: última lectura por módulo ──

@@ -1,8 +1,10 @@
-// src/write.ts — pool de escritura gobernada (ADR-0024 + ADR-0022 + ADR-0023)
+// src/write.ts — pool de escritura gobernada (ADR-0024 + ADR-0022 + ADR-0023 + ADR-0025)
 // Única excepción al invariante read-only de db.ts.
-// Solo toca lotes, alert_resolutions, modules, device_identities y tenants
-// con statements explícitos INSERT/UPDATE. Telemetría, crop_profiles, etc.
-// siguen read-only. Nada se borra: retiro/archivado/cierre = timestamp.
+// Solo toca lotes, alert_resolutions, modules, device_identities, tenants y
+// crop_profiles con statements explícitos INSERT/UPDATE. Telemetría sigue
+// read-only. Nada se borra: retiro/archivado/cierre = timestamp.
+// ADR-0025: modules.crop es caché del lote — SOLO setModulesCropDb lo escribe,
+// llamado desde open_batch (pone) y close_batch (limpia a NULL = mesa libre).
 
 import pg from "pg";
 import crypto from "node:crypto";
@@ -239,36 +241,7 @@ export async function listResolutionsDb(tenant: string): Promise<ResolutionRow[]
   return r.rows as ResolutionRow[];
 }
 
-// — Statements explícitos de escritura (solo campaigns y alert_resolutions) —
-
-export async function insertCampaignDb(
-  tenant: string,
-  crop: string,
-  modulesJson: string,
-  profileHash: string,
-  memoryHash: string | null,
-  note: string | null,
-): Promise<string> {
-  const r = await writePool.query(
-    `INSERT INTO campaigns (tenant, crop, modules, profile_hash, memory_hash, note) VALUES ($1, $2, $3::jsonb, $4, $5, $6) RETURNING id`,
-    [tenant, crop, modulesJson, profileHash, memoryHash, note],
-  );
-  const first = r.rows[0] as unknown as { id: string };
-  return first.id;
-}
-
-export async function closeCampaignDb(
-  id: string,
-  memoryHashClose: string | null,
-  note: string | null,
-): Promise<{ id: string; closed_at: Date }> {
-  const r = await writePool.query(
-    `UPDATE campaigns SET memory_hash_close = $1, closed_at = now(), state = 'closed', note = COALESCE($2, note) WHERE id = $3 RETURNING id, closed_at`,
-    [memoryHashClose, note, id],
-  );
-  const first = r.rows[0] as unknown as { id: string; closed_at: Date };
-  return { id: first.id, closed_at: first.closed_at };
-}
+// — Statements explícitos de escritura (lotes, alert_resolutions, modules, tenants, crop_profiles) —
 
 export async function insertResolutionDb(
   tenant: string,
@@ -395,16 +368,16 @@ export async function listModuleIdsDb(tenant: string): Promise<string[]> {
   return r.rows.map((row: { id: string }) => row.id);
 }
 
-/** Inserta módulo con id mod-N autogenerado. Reintenta una vez ante race de creación concurrente. */
-export async function insertModuleDb(tenant: string, name: string, crop: string): Promise<ModuleRow> {
+/** Inserta módulo LIBRE (sin cultivo — ADR-0025) con id mod-N autogenerado. Reintenta una vez ante race de creación concurrente. */
+export async function insertModuleDb(tenant: string, name: string): Promise<ModuleRow> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const ids = await listModuleIdsDb(tenant);
     const id = nextModuleId(ids);
     try {
       const r = await writePool.query(
-        `INSERT INTO modules (tenant, id, name, crop) VALUES ($1, $2, $3, $4)
+        `INSERT INTO modules (tenant, id, name) VALUES ($1, $2, $3)
          RETURNING tenant, id, name, crop, retired_at, created_at`,
-        [tenant, id, name, crop],
+        [tenant, id, name],
       );
       return r.rows[0] as ModuleRow;
     } catch (err) {
@@ -419,17 +392,14 @@ export async function insertModuleDb(tenant: string, name: string, crop: string)
 export async function updateModuleDb(
   tenant: string,
   id: string,
-  fields: { name?: string; crop?: string },
+  fields: { name?: string },
 ): Promise<ModuleRow | null> {
+  // ADR-0025: crop NO es editable aquí — lo escribe solo el ciclo del lote (setModulesCropDb)
   const sets: string[] = [];
   const params: unknown[] = [tenant, id];
   if (fields.name !== undefined) {
     params.push(fields.name);
     sets.push(`name = $${params.length}`);
-  }
-  if (fields.crop !== undefined) {
-    params.push(fields.crop);
-    sets.push(`crop = $${params.length}`);
   }
   if (sets.length === 0) return getModuleDb(tenant, id);
   const r = await writePool.query(
@@ -438,6 +408,18 @@ export async function updateModuleDb(
     params,
   );
   return (r.rows[0] as ModuleRow) ?? null;
+}
+
+/**
+ * ÚNICA escritora de modules.crop (ADR-0025): el ciclo del lote.
+ * open_batch la llama con el cultivo; close_batch con null (mesa libre).
+ */
+export async function setModulesCropDb(tenant: string, moduleIds: string[], crop: string | null): Promise<void> {
+  if (moduleIds.length === 0) return;
+  await writePool.query(
+    `UPDATE modules SET crop = $3 WHERE tenant = $1 AND id = ANY($2)`,
+    [tenant, moduleIds, crop],
+  );
 }
 
 /** Retiro gobernado: UPDATE solo si aún activo. Retorna null si ya estaba retirado o no existe. */
@@ -563,4 +545,71 @@ export async function archiveTenantDb(id: string, archived: boolean): Promise<Te
     [id],
   );
   return (r.rows[0] as TenantRow) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Perfiles de cultivo — escritura gobernada (ADR-0025, regla 9: solo humano)
+// La PWA (el humano) crea/edita; el LLM jamás toca rangos biológicos.
+// name = PK inmutable una vez creado (los lotes hashean el perfil al abrir).
+// ---------------------------------------------------------------------------
+
+export type CropProfileRow = {
+  name: string;
+  ec_min: number;
+  ec_max: number;
+  ph_min: number;
+  ph_max: number;
+  water_temp_min: number;
+  water_temp_max: number;
+  cycle_days: number | null;
+  notes: string | null;
+};
+
+const CROP_NAME_RE = /^[a-z0-9][a-z0-9_]*$/;
+
+/** name = slug minúscula con guiones bajos (especie o especie_variedad, ADR-0019). */
+export function isValidCropName(name: string): boolean {
+  return name.length >= 2 && name.length <= 64 && CROP_NAME_RE.test(name);
+}
+
+/** Rangos coherentes: min < max en las tres variables. */
+export function isValidProfileRanges(p: { ec_min: number; ec_max: number; ph_min: number; ph_max: number; water_temp_min: number; water_temp_max: number }): boolean {
+  return (
+    Number.isFinite(p.ec_min) && Number.isFinite(p.ec_max) && p.ec_min < p.ec_max && p.ec_min >= 0 &&
+    Number.isFinite(p.ph_min) && Number.isFinite(p.ph_max) && p.ph_min < p.ph_max && p.ph_min >= 0 && p.ph_max <= 14 &&
+    Number.isFinite(p.water_temp_min) && Number.isFinite(p.water_temp_max) && p.water_temp_min < p.water_temp_max
+  );
+}
+
+const PROFILE_COLS = `name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes`;
+
+export async function insertCropProfileDb(p: CropProfileRow): Promise<CropProfileRow | null> {
+  const r = await writePool.query(
+    `INSERT INTO crop_profiles (name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (name) DO NOTHING RETURNING ${PROFILE_COLS}`,
+    [p.name, p.ec_min, p.ec_max, p.ph_min, p.ph_max, p.water_temp_min, p.water_temp_max, p.cycle_days, p.notes],
+  );
+  return (r.rows[0] as CropProfileRow) ?? null;
+}
+
+/** Edita rangos/ciclo/notas de un perfil existente. name jamás se toca (PK referenciada por lotes). */
+export async function updateCropProfileDb(
+  name: string,
+  fields: { ec_min?: number; ec_max?: number; ph_min?: number; ph_max?: number; water_temp_min?: number; water_temp_max?: number; cycle_days?: number | null; notes?: string | null },
+): Promise<CropProfileRow | null> {
+  const sets: string[] = [];
+  const params: unknown[] = [name];
+  for (const key of ["ec_min", "ec_max", "ph_min", "ph_max", "water_temp_min", "water_temp_max", "cycle_days", "notes"] as const) {
+    if (fields[key] !== undefined) {
+      params.push(fields[key]);
+      sets.push(`${key} = $${params.length}`);
+    }
+  }
+  if (sets.length === 0) return null;
+  const r = await writePool.query(
+    `UPDATE crop_profiles SET ${sets.join(", ")} WHERE name = $1 RETURNING ${PROFILE_COLS}`,
+    params,
+  );
+  return (r.rows[0] as CropProfileRow) ?? null;
 }

@@ -25,6 +25,11 @@ import {
   listInvariantAlertsDb,
   insertBatchDb,
   closeBatchDb,
+  setModulesCropDb,
+  insertCropProfileDb,
+  updateCropProfileDb,
+  isValidCropName,
+  isValidProfileRanges,
   insertResolutionDb,
   isValidHwId,
   getModuleDb,
@@ -260,8 +265,8 @@ export function createMcpServer(): McpServer {
       // adelantado/atrás; el reporte debe seguir el reloj de los DATOS.
       const day = date ?? (await latestTelemetryDateDb(tenant)) ?? new Date().toISOString().slice(0, 10);
       const modules = await listModulesDb(tenant);
-      // Perfiles para los crops de esos módulos
-      const crops = [...new Set(modules.map((m) => m.crop))];
+      // Perfiles para los crops de esos módulos (null = mesa libre sin lote, ADR-0025 → sin perfil)
+      const crops = [...new Set(modules.map((m) => m.crop).filter((c): c is string => c !== null && c !== undefined))];
       const profiles = new Map<string, { ec_min: number; ec_max: number; ph_min: number; ph_max: number; water_temp_min: number; water_temp_max: number; notes?: string }>();
       for (const c of crops) {
         const p = await getCropProfileDb(c);
@@ -328,11 +333,11 @@ export function createMcpServer(): McpServer {
     "open_batch",
     {
       title: "Abrir lote de producción",
-      description: "Abre un lote: cultivo + módulos EXPLÍCITOS + etiqueta de campaña opcional. Regla física: un módulo solo está en UN lote activo; el cultivo del lote debe coincidir con el del módulo; módulos retirados no entran. Calcula profile_hash (sha256 del row crop_profiles), memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente) y expected_end_at (started_at + cycle_days, null si el perfil no tiene ciclo).",
+      description: "Abre un lote: cultivo + módulos EXPLÍCITOS + etiqueta de campaña opcional. Regla física: un módulo solo está en UN lote activo; los módulos son infraestructura fungible (ADR-0025) — cualquier módulo libre acepta cualquier cultivo, y al abrir el lote el cultivo queda escrito en los módulos (caché); módulos retirados no entran. Calcula profile_hash (sha256 del row crop_profiles), memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente) y expected_end_at (started_at + cycle_days, null si el perfil no tiene ciclo).",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         crop: z.string().describe("Cultivo/programa (crop_profiles.name)"),
-        modules: z.array(z.string()).min(1).describe("Módulos que ocupa el lote (mod-N) — explícitos, uno o varios"),
+        modules: z.array(z.string()).min(1).describe("Módulos que ocupa el lote (mod-N) — explícitos, uno o varios, deben estar libres"),
         campaign: z.string().optional().describe("Etiqueta lógica libre de temporada, ej 'invierno-2026' (null = sin campaña)"),
         note: z.string().optional().describe("Nota opcional de apertura"),
       },
@@ -345,7 +350,7 @@ export function createMcpServer(): McpServer {
           structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
         };
       }
-      // Validar cada módulo: existe, activo, cultivo coincide
+      // Validar cada módulo: existe y no está retirado (el cultivo es fungible — ADR-0025)
       for (const moduleId of modules) {
         const mod = await getModuleDb(tenant, moduleId);
         if (!mod) {
@@ -358,12 +363,6 @@ export function createMcpServer(): McpServer {
           return {
             content: [{ type: "text", text: `módulo retirado no entra en lotes: ${moduleId}` }],
             structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
-          };
-        }
-        if (mod.crop !== crop) {
-          return {
-            content: [{ type: "text", text: `${moduleId} tiene cultivo '${mod.crop}', el lote es '${crop}' — cambia el módulo de cultivo primero` }],
-            structuredContent: { error: "crop_mismatch", tenant, module: moduleId, module_crop: mod.crop, crop } as unknown as Record<string, unknown>,
           };
         }
       }
@@ -383,6 +382,8 @@ export function createMcpServer(): McpServer {
         tenant, crop, campaign: campaign ?? null, modulesJson: JSON.stringify(modules),
         expectedEndAt, profileHash, memoryHash, note: note ?? null,
       });
+      // ADR-0025: el lote pone el cultivo en las mesas que ocupa (caché; única escritora)
+      await setModulesCropDb(tenant, modules, crop);
       const text = `Lote abierto ${code} (${id}) tenant=${tenant} crop=${crop} modules=${modules.join(",")}${campaign ? ` campaña='${campaign}'` : ""} profile_hash=${profileHash.slice(0, 8)}…`;
       return {
         content: [{ type: "text", text: `${text}\n${summaryText({ id, code, tenant, crop, campaign, modules, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash })}` }],
@@ -419,6 +420,8 @@ export function createMcpServer(): McpServer {
       }
       const memoryHashClose = await computeMemoryHash(batch.crop);
       const row = await closeBatchDb(id, reason, memoryHashClose, note ?? null);
+      // ADR-0025: al cerrar, las mesas vuelven a estar libres (sin cultivo)
+      await setModulesCropDb(batch.tenant, (batch.modules as unknown as string[]) ?? [], null);
       const text = `Lote cerrado ${row?.code ?? id} razón=${reason}`;
       return {
         content: [{ type: "text", text: `${text}\n${summaryText({ id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose })}` }],
@@ -500,26 +503,119 @@ export function createMcpServer(): McpServer {
     {
       title: "Crear módulo",
       description:
-        "Crea un módulo (unidad lógica de cultivo, ADR-0022) con id técnico autogenerado mod-N y nombre humano libre. Valida que el cultivo existe en crop_profiles. Nace sin fierro: vincular luego con claim_device.",
+        "Crea un módulo (mesa, infraestructura fungible — ADR-0025) con id técnico autogenerado mod-N y nombre humano libre. Nace LIBRE (sin cultivo): el cultivo lo pone el lote al abrirse (open_batch). Nace sin fierro: vincular luego con claim_device.",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         name: z.string().min(1).describe("Nombre humano del módulo (ej: 'Mesa Norte')"),
-        crop: z.string().describe("Cultivo (crop_profiles.name)"),
       },
     },
-    async ({ tenant, name, crop }) => {
-      const profile = await getCropProfileDb(crop);
-      if (!profile) {
-        return {
-          content: [{ type: "text", text: `crop no existe: ${crop}` }],
-          structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
-        };
-      }
-      const row = await insertModuleDb(tenant, name, crop);
+    async ({ tenant, name }) => {
+      const row = await insertModuleDb(tenant, name);
       await publishModuleMeta(tenant, row.id, "module_created");
       return {
-        content: [{ type: "text", text: `Módulo creado ${row.id} "${name}" tenant=${tenant} crop=${crop}\n${summaryText(row)}` }],
+        content: [{ type: "text", text: `Módulo creado ${row.id} "${name}" tenant=${tenant} — libre, sin cultivo hasta que un lote lo ocupe\n${summaryText(row)}` }],
         structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — create_crop_profile (ADR-0025, regla 9: solo humano vía PWA) ------------
+  const profileFields = {
+    ec_min: z.number().describe("EC mínima (mS/cm)"),
+    ec_max: z.number().describe("EC máxima (mS/cm)"),
+    ph_min: z.number().describe("pH mínimo"),
+    ph_max: z.number().describe("pH máximo"),
+    water_temp_min: z.number().describe("Temperatura mínima del agua (°C)"),
+    water_temp_max: z.number().describe("Temperatura máxima del agua (°C)"),
+    cycle_days: z.number().int().positive().optional().describe("Duración del ciclo trasplante→cosecha en días (null = sin estimación; el lote queda sin fin esperado)"),
+    notes: z.string().optional().describe("Notas del perfil (receta, observaciones)"),
+  };
+  server.registerTool(
+    "create_crop_profile",
+    {
+      title: "Crear perfil de cultivo",
+      description:
+        "Crea un perfil de cultivo (la receta biológica: rangos EC/pH/temperatura de agua + días de ciclo). name = slug inmutable (especie o especie_variedad, ej 'lechuga'/'lechuga_romana'). Solo humano (regla 9) — el LLM jamás crea ni edita rangos biológicos.",
+      inputSchema: {
+        name: z.string().describe("Slug del cultivo (minúsculas, ej 'lechuga')"),
+        ...profileFields,
+      },
+    },
+    async (input) => {
+      if (!isValidCropName(input.name)) {
+        return {
+          content: [{ type: "text", text: `name inválido: '${input.name}' — slug minúscula con guiones bajos (especie o especie_variedad)` }],
+          structuredContent: { error: "invalid_name", name: input.name } as unknown as Record<string, unknown>,
+        };
+      }
+      if (!isValidProfileRanges(input)) {
+        return {
+          content: [{ type: "text", text: "rangos incoherentes: min < max en EC/pH/temperatura, pH entre 0 y 14" }],
+          structuredContent: { error: "invalid_ranges" } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await insertCropProfileDb({
+        name: input.name, ec_min: input.ec_min, ec_max: input.ec_max,
+        ph_min: input.ph_min, ph_max: input.ph_max,
+        water_temp_min: input.water_temp_min, water_temp_max: input.water_temp_max,
+        cycle_days: input.cycle_days ?? null, notes: input.notes ?? null,
+      });
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `perfil ya existe: ${input.name} — usa update_crop_profile` }],
+          structuredContent: { error: "profile_exists", name: input.name } as unknown as Record<string, unknown>,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Perfil creado '${row.name}' EC ${row.ec_min}-${row.ec_max}, pH ${row.ph_min}-${row.ph_max}, ${row.cycle_days ?? "?"}d\n${summaryText(row)}` }],
+        structuredContent: { profile: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — update_crop_profile (ADR-0025, regla 9) ---------------------------------
+  server.registerTool(
+    "update_crop_profile",
+    {
+      title: "Editar perfil de cultivo",
+      description:
+        "Edita rangos/ciclo/notas de un perfil existente. name es inmutable (los lotes hashean el perfil al abrir — el historial no se reescribe). Solo humano (regla 9).",
+      inputSchema: {
+        name: z.string().describe("Slug del cultivo a editar"),
+        ec_min: z.number().optional(), ec_max: z.number().optional(),
+        ph_min: z.number().optional(), ph_max: z.number().optional(),
+        water_temp_min: z.number().optional(), water_temp_max: z.number().optional(),
+        cycle_days: z.number().int().positive().nullable().optional(),
+        notes: z.string().nullable().optional(),
+      },
+    },
+    async ({ name, ...fields }) => {
+      const clean = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
+      if (Object.keys(clean).length === 0) {
+        return {
+          content: [{ type: "text", text: "nada que actualizar: pasa al menos un campo" }],
+          structuredContent: { error: "no_fields", name } as unknown as Record<string, unknown>,
+        };
+      }
+      const current = await getCropProfileDb(name);
+      if (!current) {
+        return {
+          content: [{ type: "text", text: `perfil no existe: ${name}` }],
+          structuredContent: { error: "profile_not_found", name } as unknown as Record<string, unknown>,
+        };
+      }
+      // Validar coherencia del RESULTADO (merge actual + cambios), no solo de los campos dados
+      const merged = { ...current, ...clean } as { ec_min: number; ec_max: number; ph_min: number; ph_max: number; water_temp_min: number; water_temp_max: number };
+      if (!isValidProfileRanges(merged)) {
+        return {
+          content: [{ type: "text", text: "el resultado sería incoherente: min < max en EC/pH/temperatura, pH entre 0 y 14" }],
+          structuredContent: { error: "invalid_ranges", name } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await updateCropProfileDb(name, clean);
+      return {
+        content: [{ type: "text", text: `Perfil '${name}' actualizado\n${summaryText(row)}` }],
+        structuredContent: { profile: row } as unknown as Record<string, unknown>,
       };
     },
   );
@@ -530,15 +626,14 @@ export function createMcpServer(): McpServer {
     {
       title: "Actualizar módulo",
       description:
-        "Renombra un módulo y/o cambia su cultivo. Reglas: módulo retirado no se edita; cambio de cultivo bloqueado si el módulo está en un lote activo (congelamiento ADR-0024). Al renombrar, el router refresca el nombre/área en Home Assistant.",
+        "Renombra un módulo. Reglas: módulo retirado no se edita. El cultivo NO se edita aquí (ADR-0025): es caché del ciclo del lote — lo escribe open_batch y lo limpia close_batch. Al renombrar, el router refresca el nombre/área en Home Assistant.",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         module: z.string().describe("Id técnico del módulo (mod-N)"),
-        name: z.string().min(1).optional().describe("Nuevo nombre humano"),
-        crop: z.string().optional().describe("Nuevo cultivo (crop_profiles.name)"),
+        name: z.string().min(1).describe("Nuevo nombre humano"),
       },
     },
-    async ({ tenant, module: moduleId, name, crop }) => {
+    async ({ tenant, module: moduleId, name }) => {
       const mod = await getModuleDb(tenant, moduleId);
       if (!mod) {
         return {
@@ -552,35 +647,10 @@ export function createMcpServer(): McpServer {
           structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
         };
       }
-      if (name === undefined && crop === undefined) {
-        return {
-          content: [{ type: "text", text: "nada que actualizar: pasa name y/o crop" }],
-          structuredContent: { error: "no_fields", tenant, module: moduleId } as unknown as Record<string, unknown>,
-        };
-      }
-      if (crop !== undefined) {
-        const profile = await getCropProfileDb(crop);
-        if (!profile) {
-          return {
-            content: [{ type: "text", text: `crop no existe: ${crop}` }],
-            structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
-          };
-        }
-        if (crop !== mod.crop) {
-          const batch = await getOpenBatchWithModuleDb(tenant, moduleId);
-          if (batch) {
-            const text = `cambio de cultivo bloqueado: ${moduleId} está en el lote activo ${batch.code} — cierra el lote primero`;
-            return {
-              content: [{ type: "text", text }],
-              structuredContent: { error: "module_in_open_batch", tenant, module: moduleId, batch_id: batch.id, code: batch.code } as unknown as Record<string, unknown>,
-            };
-          }
-        }
-      }
-      const row = await updateModuleDb(tenant, moduleId, { name, crop });
+      const row = await updateModuleDb(tenant, moduleId, { name });
       await publishModuleMeta(tenant, moduleId, "module_updated");
       return {
-        content: [{ type: "text", text: `Módulo ${moduleId} actualizado\n${summaryText(row)}` }],
+        content: [{ type: "text", text: `Módulo ${moduleId} renombrado a "${name}"\n${summaryText(row)}` }],
         structuredContent: { module: row } as unknown as Record<string, unknown>,
       };
     },

@@ -54,13 +54,13 @@ const sensorRng = mulberry32((seed ^ hwTail) >>> 0);
 
 type PhysicsState = {
   hw_id: string;
-  crop: string;
+  crop: string | null; // ADR-0025: null = mesa libre (sin lote)
   ts: number;
   startMs: number;
   elapsedDays: number;
   state: ModuleState;
   weather: { airTemp: number; humidity: number };
-  cropTargets: CropTargets;
+  cropTargets: CropTargets | null; // null = sin cultivo → sin auto-dosis
   disableAutoDose: boolean;
   deadDevices: string[];
   offs?: { device: string; ts: number; durationMs: number }[];
@@ -270,8 +270,11 @@ const interval = setInterval(async () => {
     }
   }
 
-  // auto-dosis: protección de cultivo del firmware (una acción por ciclo)
-  const action = decideAutoDose(st.state, st.cropTargets, st.disableAutoDose, sensorRng);
+  // auto-dosis: protección de cultivo del firmware (una acción por ciclo).
+  // ADR-0025: mesa libre (cropTargets null) → no hay cultivo que proteger.
+  const action = st.cropTargets
+    ? decideAutoDose(st.state, st.cropTargets, st.disableAutoDose, sensorRng)
+    : null;
   if (action) {
     await actuate(action.device, "ON", action.durationMs);
     const metric = action.device === "valve-fill-01" ? "level" : action.device === "doser-ph-01" ? "ph" : "ec";

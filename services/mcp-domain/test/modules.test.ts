@@ -64,3 +64,40 @@ describe("moduleInBatch — congelamiento ADR-0024", () => {
     expect(moduleInBatch({ a: 1 }, "mod-1")).toBe(false);
   });
 });
+
+import { isValidCropName, isValidProfileRanges } from "../src/write.js";
+
+// Perfiles de cultivo gobernados (ADR-0025, regla 9: solo humano vía PWA)
+
+describe("isValidCropName — slug de cultivo", () => {
+  it("acepta especie y especie_variedad", () => {
+    expect(isValidCropName("lechuga")).toBe(true);
+    expect(isValidCropName("lechuga_romana")).toBe(true);
+  });
+
+  it("rechaza mayúsculas, espacios, guiones y cortos", () => {
+    expect(isValidCropName("Lechuga")).toBe(false);
+    expect(isValidCropName("lechuga romana")).toBe(false);
+    expect(isValidCropName("lechuga-romana")).toBe(false);
+    expect(isValidCropName("l")).toBe(false);
+  });
+});
+
+describe("isValidProfileRanges — coherencia biológica", () => {
+  const ok = { ec_min: 1.2, ec_max: 1.8, ph_min: 5.8, ph_max: 6.3, water_temp_min: 18, water_temp_max: 24 };
+
+  it("acepta rangos coherentes", () => {
+    expect(isValidProfileRanges(ok)).toBe(true);
+  });
+
+  it("rechaza min >= max en cualquier variable", () => {
+    expect(isValidProfileRanges({ ...ok, ec_min: 2.0, ec_max: 1.8 })).toBe(false);
+    expect(isValidProfileRanges({ ...ok, ph_min: 6.3, ph_max: 6.3 })).toBe(false);
+    expect(isValidProfileRanges({ ...ok, water_temp_min: 30, water_temp_max: 24 })).toBe(false);
+  });
+
+  it("rechaza pH fuera de 0-14 y valores no finitos", () => {
+    expect(isValidProfileRanges({ ...ok, ph_max: 15 })).toBe(false);
+    expect(isValidProfileRanges({ ...ok, ec_min: NaN })).toBe(false);
+  });
+});

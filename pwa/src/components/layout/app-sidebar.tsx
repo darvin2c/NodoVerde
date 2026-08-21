@@ -1,6 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
-  LayoutDashboard, Boxes, TriangleAlert, Wallet, CheckSquare, Camera, Activity, Sprout, MapPinned
+  LayoutDashboard, Boxes, TriangleAlert, Wallet, CheckSquare, Camera, Activity, Sprout, MapPinned, Leaf
 } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent,
@@ -19,6 +19,7 @@ const NAV_MAIN = [
 
 const NAV_OPS = [
   { to: "/produccion", label: "Producción", icon: Sprout },
+  { to: "/perfiles", label: "Perfiles", icon: Leaf },
   { to: "/aprobaciones", label: "Aprobaciones", icon: CheckSquare },
   { to: "/finanzas", label: "Finanzas", icon: Wallet },
   { to: "/camaras", label: "Cámaras", icon: Camera },

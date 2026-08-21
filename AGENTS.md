@@ -14,7 +14,8 @@ terraOS: agente autónomo de gestión agrícola integral (financiero + operacion
 6. **Tablas del agente** — solo con prefijo `agent_*`; jamás duplicando movimientos financieros.
 7. **Conocimiento honesto (ADR-0010)** — ausencia de dato ≠ dato cero. El agente declara lo que no sabe; la confianza la calcula código determinístico, nunca el LLM.
 8. **Historia financiera inmutable (ADR-0011)** — nada se borra ni se edita; corrección = anulación + nuevo movimiento. Todo movimiento se imputa a cultivo(s) con porcentajes que suman 100%.
-9. **Expertos hablan con el portero directo (ADR-0019)** — la validación dura vive en la herramienta de actuación (código), jamás en una skill; los expertos nunca publican `cmd/` directamente ni tienen message tool. El orquestador es la única voz al humano. Los perfiles de cultivo solo cambian con aprobación humana.
+9. **Expertos hablan con el portero directo (ADR-0019)** — la validación dura vive en la herramienta de actuación (código), jamás en una skill; los expertos nunca publican `cmd/` directamente ni tienen message tool. El orquestador es la única voz al humano. Los perfiles de cultivo solo cambian con aprobación humana (vía PWA → `create/update_crop_profile`).
+10. **Flujo lote-céntrico (ADR-0025)** — la mesa (módulo) es infraestructura fungible SIN cultivo propio; el cultivo existe solo dentro de un lote vivo (`modules.crop` es caché que solo `open/close_batch` escriben). La actuación biológica (dosificar nutriente/pH) exige lote activo — el portero rechaza sin él; la actuación de fierro (bomba/válvula/aireador) sigue libre para mantenimiento. El sim solo cultiva donde hay lote abierto.
 
 ## Cómo correr (Fase 3)
 

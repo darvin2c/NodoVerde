@@ -18,7 +18,8 @@ const FincaSchema = z.object({
   modules: z.array(
     z.object({
       hw_id: z.string().regex(/^[0-9a-f]{12}$/),
-      crop: z.string(),
+      // ADR-0025: la mesa nace LIBRE; el cultivo lo pone el lote (DB), no el yaml
+      crop: z.string().optional(),
     }),
   ),
 });
@@ -86,7 +87,7 @@ export function loadCrop(crop: string, baseDir?: string): CropConfig {
 
 export function loadAllCrops(finca: FincaConfig): Map<string, CropConfig> {
   const map = new Map<string, CropConfig>();
-  const uniqueCrops = [...new Set(finca.modules.map((m) => m.crop))];
+  const uniqueCrops = [...new Set(finca.modules.map((m) => m.crop).filter((c): c is string => !!c))];
   for (const c of uniqueCrops) {
     map.set(c, loadCrop(c));
   }

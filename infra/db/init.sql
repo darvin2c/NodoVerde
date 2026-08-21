@@ -33,13 +33,15 @@ CREATE TABLE IF NOT EXISTS crop_profiles (
   notes TEXT
 );
 
--- Modules (parcela / módulo) — unidad lógica de asignación (ADR-0022):
--- name = identificación humana libre; retired_at = retiro gobernado (nada se borra).
+-- Modules (parcela / módulo) — unidad lógica de asignación, infraestructura
+-- fungible (ADR-0022/0025): name = identificación humana libre; retired_at =
+-- retiro gobernado (nada se borra). crop = CACHÉ nullable del lote activo:
+-- solo open/close_batch lo escriben; NULL = mesa libre, sin cultivo.
 CREATE TABLE IF NOT EXISTS modules (
   tenant TEXT NOT NULL REFERENCES tenants(id),
   id TEXT NOT NULL,
   name TEXT,
-  crop TEXT NOT NULL REFERENCES crop_profiles(name),
+  crop TEXT REFERENCES crop_profiles(name),
   retired_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant, id)
@@ -270,11 +272,12 @@ INSERT INTO crop_profiles (name, ec_min, ec_max, ph_min, ph_max, water_temp_min,
   ('tomate', 2.0, 3.5, 5.5, 6.5, 18, 26, 90, 'Tomate indeterminado hidropónico; EC se eleva progresivamente con carga de frutos. Vigilar blossom-end rot si EC/pH fuera de rango.')
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO modules (tenant, id, name, crop) VALUES
-  ('demo', 'mod-1', 'Mesa Norte', 'lechuga'),
-  ('demo', 'mod-2', 'Mesa Sur', 'lechuga'),
-  ('demo', 'mod-3', 'Mesa Tomate', 'tomate'),
-  ('demo', 'mod-4', 'Mesa Este', 'lechuga')
+-- Mesas nacen LIBRES (sin cultivo): el cultivo lo pone el lote al abrirse (ADR-0025)
+INSERT INTO modules (tenant, id, name) VALUES
+  ('demo', 'mod-1', 'Mesa Norte'),
+  ('demo', 'mod-2', 'Mesa Sur'),
+  ('demo', 'mod-3', 'Mesa Tomate'),
+  ('demo', 'mod-4', 'Mesa Este')
 ON CONFLICT (tenant, id) DO NOTHING;
 
 INSERT INTO device_identities (hw_id, tenant, module, claimed_by) VALUES

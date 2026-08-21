@@ -225,7 +225,7 @@ export function ProduccionPage() {
                 <div key={`${m.tenant}/${m.id}`} className="rounded-lg border border-dashed p-3 text-sm">
                   <p className="font-medium">{m.name ?? m.id}</p>
                   <p className="text-xs text-muted-foreground">
-                    {active === null ? `${farmName(m.tenant)} · ` : ""}{m.id} · {m.crop}
+                    {active === null ? `${farmName(m.tenant)} · ` : ""}{m.id} · sin cultivo
                   </p>
                   <Badge variant="outline" className="mt-2">libre</Badge>
                 </div>
@@ -305,7 +305,8 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
 
   const targetFarm = active ?? farmId;
 
-  // Módulos elegibles: de la finca, activos, cultivo coincide, y NO ocupados por un lote abierto
+  // Módulos elegibles (ADR-0025): de la finca, activos y LIBRES. Las mesas son
+  // infraestructura fungible — cualquier mesa libre acepta cualquier cultivo.
   const occupiedIds = useMemo(() => {
     const s = new Set<string>();
     for (const l of openLotes) for (const m of l.modules) s.add(`${l.tenant}/${m.id}`);
@@ -314,8 +315,8 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
 
   const eligible = useMemo(
     () => (modulesList ?? []).filter((m) =>
-      m.tenant === targetFarm && !m.retired_at && m.crop === crop && !occupiedIds.has(`${m.tenant}/${m.id}`)),
-    [modulesList, targetFarm, crop, occupiedIds]
+      m.tenant === targetFarm && !m.retired_at && !occupiedIds.has(`${m.tenant}/${m.id}`)),
+    [modulesList, targetFarm, occupiedIds]
   );
 
   // Etiquetas de campaña ya usadas (datalist — texto libre con sugerencias)
@@ -385,10 +386,10 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
           </label>
           {crop && targetFarm && (
             <div className="space-y-1">
-              <span className="text-xs font-medium">Módulos que ocupará (solo libres con ese cultivo)</span>
+              <span className="text-xs font-medium">Mesas que ocupará (cualquier mesa libre acepta el cultivo)</span>
               {eligible.length === 0 && (
                 <p className="text-xs text-muted-foreground">
-                  Ningún módulo libre con cultivo '{crop}' en {farmName(targetFarm)} — cambia un módulo de cultivo o cierra el lote que lo ocupa.
+                  Ninguna mesa libre en {farmName(targetFarm)} — crea una en Módulos o cierra el lote que la ocupa.
                 </p>
               )}
               <div className="flex flex-wrap gap-2">

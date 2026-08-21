@@ -316,6 +316,52 @@ describe("pipeline proposeAction — flujo completo", () => {
     } as never);
   }
 
+  function mockModuleLibre() {
+    // getModuleWithCrop → mesa LIBRE (ADR-0025): existe pero crop NULL (sin lote activo)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ tenant: "demo", module: "mod-9", crop: null, ec_min: null, ec_max: null, ph_min: null, ph_max: null, water_temp_min: null, water_temp_max: null, tz: "America/Lima" }],
+    } as never);
+  }
+
+  it("ADR-0025: dosificar en mesa libre (sin lote) = rechazado no_active_batch", async () => {
+    mockModuleLibre();
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: "id-x", policy_id: "pol-x", status: "rejected" }] } as never); // audit insert
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-9",
+      device: "doser-a-01",
+      action: "start",
+      params: { duration_ms: 2000 },
+      requested_by: "agent-test",
+    });
+    expect(res.status).toBe("rejected");
+    expect(res.reason).toContain("no_active_batch");
+    expect(published.length).toBe(0); // jamás cmd a una dosificadora sin cultivo
+  });
+
+  it("ADR-0025: infraestructura (valve-fill) en mesa libre sigue permitida", async () => {
+    moduleConfidence.set("demo/mod-9", { v: 85, ts: Date.now(), sources: { ec: 90, ph: 90, level: 90 } });
+    moduleHealth.set("demo/mod-9", "healthy");
+    lastReadings.set("demo/mod-9/level", { v: 50, ts: Date.now() });
+    mockModuleLibre();
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never); // lastExecuted
+    mockQuery.mockImplementationOnce(async (_sql: string, params: unknown[]) => ({
+      rows: [{ id: "id-y", policy_id: params[1], tenant: "demo", module: "mod-9", device: "valve-fill-01", action: "start", status: "executed" }],
+    }) as never);
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-9",
+      device: "valve-fill-01",
+      action: "start",
+      params: { duration_ms: 5000 },
+      requested_by: "human-test",
+      source: "human",
+    });
+    expect(res.status).toBe("executed");
+    expect(published.length).toBe(1);
+  });
+
   it("autonomous (fill_water) ejecuta inmediato y publica cmd", async () => {
     mockModuleOk();
     // hasPendingFor false

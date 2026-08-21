@@ -131,24 +131,29 @@ describe("cameras.lastPhoto y pending.alerts vacíos", () => {
 const domainCalls: Array<{ tool: string; args: unknown }> = [];
 vi.mock("../server/mcpDomain.js", () => ({
   resolveAlert: vi.fn(),
-  createModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "create_module", args }); return { module: { tenant: "demo", id: "mod-5", name: "Mesa Prueba", crop: "lechuga" } }; }),
+  createModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "create_module", args }); return { module: { tenant: "demo", id: "mod-5", name: "Mesa Prueba", crop: null } }; }),
   updateModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "update_module", args }); return { module: { id: "mod-1", name: "Mesa Nueva" } }; }),
   retireModule: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "retire_module", args }); return { module: { id: "mod-1", retired_at: "2026-08-20" } }; }),
   claimDevice: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "claim_device", args }); return { hw_id: "020000000005" }; }),
   createTenant: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "create_tenant", args }); return { tenant: { id: "ica", name: "Finca Ica" } }; }),
   updateTenant: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "update_tenant", args }); return { tenant: { id: "ica", name: "Finca Ica Norte" } }; }),
-  archiveTenant: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "archive_tenant", args }); return { tenant: { id: "ica", archived_at: "2026-08-21" } }; })
+  archiveTenant: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "archive_tenant", args }); return { tenant: { id: "ica", archived_at: "2026-08-21" } }; }),
+  createCropProfile: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "create_crop_profile", args }); return { profile: { name: "lechuga_romana" } }; }),
+  updateCropProfile: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "update_crop_profile", args }); return { profile: { name: "lechuga", ec_min: 1.0 } }; }),
+  openBatch: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "open_batch", args }); return { id: "b-1", code: "LOTE-0009" }; }),
+  closeBatch: vi.fn(async (args: unknown) => { domainCalls.push({ tool: "close_batch", args }); return { id: "b-1", code: "LOTE-0009" }; })
 }));
 
 describe("modules mutations — delegación gobernada al MCP", () => {
-  it("create pasa tenant/name/crop al MCP y devuelve el módulo creado", async () => {
+  it("create pasa solo tenant/name (la mesa nace LIBRE, sin cultivo — ADR-0025)", async () => {
     const caller = callerWith(mockDb());
-    const res = await caller.modules.create({ tenant: "demo", name: "Mesa Prueba", crop: "lechuga" }) as { module: { id: string } };
+    const res = await caller.modules.create({ tenant: "demo", name: "Mesa Prueba" }) as { module: { id: string; crop: string | null } };
     expect(res.module.id).toBe("mod-5");
-    expect(domainCalls.at(-1)).toEqual({ tool: "create_module", args: { tenant: "demo", name: "Mesa Prueba", crop: "lechuga" } });
+    expect(res.module.crop).toBeNull();
+    expect(domainCalls.at(-1)).toEqual({ tool: "create_module", args: { tenant: "demo", name: "Mesa Prueba" } });
   });
 
-  it("update pasa rename al MCP", async () => {
+  it("update renombra; el cultivo NO se edita por módulo (ADR-0025)", async () => {
     const caller = callerWith(mockDb());
     await caller.modules.update({ tenant: "demo", module: "mod-1", name: "Mesa Nueva" });
     expect(domainCalls.at(-1)).toEqual({ tool: "update_module", args: { tenant: "demo", module: "mod-1", name: "Mesa Nueva" } });
@@ -375,5 +380,37 @@ describe("batches.list — lotes de producción (ADR-0024)", () => {
   it("DB caída devuelve lista vacía honesta", async () => {
     const db = { execute: vi.fn().mockRejectedValue(new Error("db down")) } as unknown as never;
     expect(await callerWith(db).batches.list({})).toEqual([]);
+  });
+});
+
+// — Perfiles de cultivo (ADR-0025, regla 9: el humano escribe vía MCP gobernado) —
+describe("profiles router — catálogo biológico gobernado", () => {
+  it("create delega al MCP con rangos completos", async () => {
+    const caller = callerWith(mockDb());
+    await caller.profiles.create({
+      name: "lechuga_romana", ec_min: 1.2, ec_max: 1.8,
+      ph_min: 5.8, ph_max: 6.3, water_temp_min: 18, water_temp_max: 24,
+      cycle_days: 45, notes: "variedad romana"
+    });
+    expect(domainCalls.at(-1)).toEqual({
+      tool: "create_crop_profile",
+      args: { name: "lechuga_romana", ec_min: 1.2, ec_max: 1.8, ph_min: 5.8, ph_max: 6.3, water_temp_min: 18, water_temp_max: 24, cycle_days: 45, notes: "variedad romana" }
+    });
+  });
+
+  it("create rechaza slug inválido ANTES de llamar al MCP", async () => {
+    const caller = callerWith(mockDb());
+    const before = domainCalls.length;
+    await expect(caller.profiles.create({
+      name: "Lechuga Romana", ec_min: 1.2, ec_max: 1.8,
+      ph_min: 5.8, ph_max: 6.3, water_temp_min: 18, water_temp_max: 24
+    })).rejects.toThrow();
+    expect(domainCalls.length).toBe(before);
+  });
+
+  it("update delega cambios parciales; name inmutable", async () => {
+    const caller = callerWith(mockDb());
+    await caller.profiles.update({ name: "lechuga", ec_min: 1.0 });
+    expect(domainCalls.at(-1)).toEqual({ tool: "update_crop_profile", args: { name: "lechuga", ec_min: 1.0 } });
   });
 });

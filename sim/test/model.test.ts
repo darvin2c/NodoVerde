@@ -110,3 +110,33 @@ describe("modelo hidropónico", () => {
     expect(s.waterTemp).toBeCloseTo(30, 0);
   });
 });
+
+describe("ADR-0025 — mesa sin lote no tiene plantas", () => {
+  it("módulo libre (crop null) no consume nutrientes: EC estable al sol", () => {
+    const rng = mulberry32(42);
+    const noonMs = Date.UTC(2024, 7, 1, 12, 0, 0);
+    const climNoon = climateForTime(noonMs, rng);
+    // mesa libre: tanque al 100% para aislar el consumo de la evaporación
+    let libre = { ...createInitialModule("mod-9", null, [1.2, 1.8]), ec: 1.5, tankLevel: 100 };
+    for (let i = 0; i < 6; i++) {
+      libre = stepModule(libre, 3600, noonMs + i * 3600000, 0.8, climNoon, DEFAULT_PARAMS);
+    }
+    // sin plantas EC NO cae (no hay consumo); solo sube levemente por evaporación
+    // física real: el tanque pierde agua por ET0 y la solución se concentra
+    expect(libre.ec).toBeGreaterThanOrEqual(1.5);
+    expect(libre.ec - 1.5).toBeLessThan(0.01); // evaporación leve, nada de consumo
+    expect(libre.ph).toBe(6.0); // sin absorción no hay deriva de pH
+  });
+
+  it("el mismo módulo CON lote (crop) sí consume en el mismo fotoperiodo", () => {
+    const rng = mulberry32(42);
+    const noonMs = Date.UTC(2024, 7, 1, 12, 0, 0);
+    const climNoon = climateForTime(noonMs, rng);
+    let ocupada = { ...createInitialModule("mod-9", "lechuga", [1.2, 1.8]), ec: 1.5, tankLevel: 100 };
+    for (let i = 0; i < 6; i++) {
+      ocupada = stepModule(ocupada, 3600, noonMs + i * 3600000, 0.8, climNoon, DEFAULT_PARAMS);
+    }
+    expect(ocupada.ec).toBeLessThan(1.5); // las plantas comieron
+    expect(ocupada.ph).toBeGreaterThan(6.0); // deriva por absorción
+  });
+});

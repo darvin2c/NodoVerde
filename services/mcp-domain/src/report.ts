@@ -71,7 +71,8 @@ export type ModuleReport = {
   module: string;
   /** Nombre humano del módulo (ADR-0022); null si sin nombre */
   name: string | null;
-  crop: string;
+  /** Cultivo del lote activo (ADR-0025); null = mesa libre → sin rangos, honesto */
+  crop: string | null;
   latest: Record<string, LatestEntry>;
   missing: string[];
   stats: Record<string, StatsEntry>;
@@ -101,7 +102,7 @@ export type DailyReportData = {
 export type BuildInput = {
   date: string; // YYYY-MM-DD
   farm?: FarmInfo;
-  modules: { tenant: string; id: string; name?: string | null; crop: string; retired?: boolean }[];
+  modules: { tenant: string; id: string; name?: string | null; crop: string | null; retired?: boolean }[];
   profiles: Map<string, CropProfile>;
   telemetry: TelemetryRow[];
   confidence: Map<string, ConfidenceEntry>; // key: "tenant/module" o "module"
@@ -187,7 +188,7 @@ export function buildDailyReportData(input: BuildInput): DailyReportData {
     }
 
     // pctTimeInRange vs perfil de cultivo
-    const profile = profiles.get(mod.crop) ?? null;
+    const profile = mod.crop ? profiles.get(mod.crop) ?? null : null;
     const pctTimeInRange: Record<string, number> = {};
     if (profile) {
       const ranges: Record<string, [number, number] | null> = {

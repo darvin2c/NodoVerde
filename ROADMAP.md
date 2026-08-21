@@ -81,6 +81,7 @@ status: vigente
 | Radio campo: LoRa/celular + ChirpStack | Piloto de hardware real |
 | Auth/aislamiento multi-tenant (RLS, usuarios por finca) | Segunda finca real (la gestión/visualización multi-finca ya entró: ADR-0023) |
 | Generalizar módulo por `system_type` (hidroponía/suelo/ganado): perfil de variables, catálogo de devices y física del sim por tipo; `modules.system_type` + perfiles por tipo | Primera unidad no-hidropónica real o segunda finca con producción mixta |
+| Sensores compartidos (estación climática por invernadero, tanque común): hoy todo device se amarra a UNA mesa (`one_hardware_per_module` + topic por módulo) y el seed finge un `climate-01` por mesa — **error de diseño detectado en discusión 2026-08-21**. Fix: permitir claim al nivel invernadero/finca, un solo dueño que publica una vez y todas las mesas leen; si cae, todas pierden el dato a la vez (verdad física) | Antes del piloto de hardware real (Fase 5) — arreglarlo después cuesta 10x |
 | Multi-nodo por módulo (relajar `one_hardware_per_module` a "un fierro por rol") | Junto con `system_type` — un corral/lote puede necesitar varios nodos |
 | Tauri desktop | Notificaciones nativas / tray / autostart / offline real |
 | Fachada OpenAPI pública | Primera integración externa |
