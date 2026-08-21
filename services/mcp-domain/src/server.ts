@@ -1,5 +1,5 @@
-// src/server.ts — herramientas MCP de dominio (lectura + campaña gobernada ADR-0021)
-// Telemetría/perfiles siguen read-only (db.ts); campaigns/alert_resolutions usan write.ts (pool separado).
+// src/server.ts — herramientas MCP de dominio (lectura + lotes gobernados ADR-0024)
+// Telemetría/perfiles siguen read-only (db.ts); lotes/alert_resolutions usan write.ts (pool separado).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -19,15 +19,16 @@ import { buildDailyReportData } from "./report.js";
 import {
   computeProfileHash,
   computeMemoryHash,
-  getCurrentCampaignDb,
-  listCampaignsDb,
+  getBatchDb,
+  listBatchesDb,
+  getOccupiedModulesDb,
   listInvariantAlertsDb,
-  insertCampaignDb,
-  closeCampaignDb,
+  insertBatchDb,
+  closeBatchDb,
   insertResolutionDb,
   isValidHwId,
   getModuleDb,
-  getOpenCampaignWithModuleDb,
+  getOpenBatchWithModuleDb,
   insertModuleDb,
   updateModuleDb,
   retireModuleDb,
@@ -322,132 +323,127 @@ export function createMcpServer(): McpServer {
     },
   );
 
-  // — open_campaign ----------------------------------------------------------
+  // — open_batch (ADR-0024) --------------------------------------------------
   server.registerTool(
-    "open_campaign",
+    "open_batch",
     {
-      title: "Abrir campaña",
-      description: "Abre una campaña para un tenant y cultivo. Valida que el crop existe y que no hay campaña abierta. Calcula profile_hash (sha256 del row crop_profiles) y memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente).",
+      title: "Abrir lote de producción",
+      description: "Abre un lote: cultivo + módulos EXPLÍCITOS + etiqueta de campaña opcional. Regla física: un módulo solo está en UN lote activo; el cultivo del lote debe coincidir con el del módulo; módulos retirados no entran. Calcula profile_hash (sha256 del row crop_profiles), memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente) y expected_end_at (started_at + cycle_days, null si el perfil no tiene ciclo).",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
-        crop: z.string().describe("Nombre del cultivo (crop_profiles.name)"),
+        crop: z.string().describe("Cultivo/programa (crop_profiles.name)"),
+        modules: z.array(z.string()).min(1).describe("Módulos que ocupa el lote (mod-N) — explícitos, uno o varios"),
+        campaign: z.string().optional().describe("Etiqueta lógica libre de temporada, ej 'invierno-2026' (null = sin campaña)"),
         note: z.string().optional().describe("Nota opcional de apertura"),
       },
     },
-    async ({ tenant, crop, note }) => {
+    async ({ tenant, crop, modules, campaign, note }) => {
       const profile = await getCropProfileDb(crop);
       if (!profile) {
-        const text = `crop no existe: ${crop}`;
         return {
-          content: [{ type: "text", text }],
+          content: [{ type: "text", text: `crop no existe: ${crop}` }],
           structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
         };
       }
-      const current = await getCurrentCampaignDb(tenant);
-      if (current) {
-        const text = `ya hay campaña abierta para tenant=${tenant} id=${current.id}`;
-        return {
-          content: [{ type: "text", text }],
-          structuredContent: { error: "campaign_already_open", tenant, campaign_id: current.id } as unknown as Record<string, unknown>,
-        };
-      }
-      const mods = await listModulesDb(tenant);
-      // Módulos retirados no entran en campañas nuevas (ADR-0022)
-      const filtered = mods.filter((m) => m.crop === crop && m.retired_at === null).map((m) => m.id);
-      const profileHash = computeProfileHash(profile as Record<string, unknown>);
-      const memoryHash = await computeMemoryHash(crop);
-      try {
-        const id = await insertCampaignDb(tenant, crop, JSON.stringify(filtered), profileHash, memoryHash, note ?? null);
-        const text = `Campaña abierta ${id} tenant=${tenant} crop=${crop} modules=${filtered.join(",")} profile_hash=${profileHash.slice(0, 8)}…`;
-        return {
-          content: [{ type: "text", text: `${text}\n${summaryText({ id, tenant, crop, modules: filtered, profile_hash: profileHash, memory_hash: memoryHash })}` }],
-          structuredContent: { id, tenant, crop, modules: filtered, profile_hash: profileHash, memory_hash: memoryHash } as unknown as Record<string, unknown>,
-        };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("campaigns_one_open_per_tenant") || msg.includes("duplicate") || msg.includes("unique")) {
-          const text = `ya hay campaña abierta para tenant=${tenant}`;
+      // Validar cada módulo: existe, activo, cultivo coincide
+      for (const moduleId of modules) {
+        const mod = await getModuleDb(tenant, moduleId);
+        if (!mod) {
           return {
-            content: [{ type: "text", text }],
-            structuredContent: { error: "campaign_already_open", tenant } as unknown as Record<string, unknown>,
+            content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+            structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
           };
         }
-        throw err;
+        if (mod.retired_at) {
+          return {
+            content: [{ type: "text", text: `módulo retirado no entra en lotes: ${moduleId}` }],
+            structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+          };
+        }
+        if (mod.crop !== crop) {
+          return {
+            content: [{ type: "text", text: `${moduleId} tiene cultivo '${mod.crop}', el lote es '${crop}' — cambia el módulo de cultivo primero` }],
+            structuredContent: { error: "crop_mismatch", tenant, module: moduleId, module_crop: mod.crop, crop } as unknown as Record<string, unknown>,
+          };
+        }
       }
+      // Regla física: un módulo, un lote activo
+      const occupied = await getOccupiedModulesDb(tenant, modules);
+      if (occupied.length > 0) {
+        return {
+          content: [{ type: "text", text: `módulos ocupados por lotes activos: ${occupied.map((o) => o.code).join(", ")} — cierra esos lotes primero` }],
+          structuredContent: { error: "modules_occupied", tenant, occupied_by: occupied.map((o) => o.code) } as unknown as Record<string, unknown>,
+        };
+      }
+      const cycleDays = (profile as Record<string, unknown>).cycle_days as number | null;
+      const expectedEndAt = cycleDays != null ? new Date(Date.now() + cycleDays * 86400000) : null;
+      const profileHash = computeProfileHash(profile as Record<string, unknown>);
+      const memoryHash = await computeMemoryHash(crop);
+      const { id, code } = await insertBatchDb({
+        tenant, crop, campaign: campaign ?? null, modulesJson: JSON.stringify(modules),
+        expectedEndAt, profileHash, memoryHash, note: note ?? null,
+      });
+      const text = `Lote abierto ${code} (${id}) tenant=${tenant} crop=${crop} modules=${modules.join(",")}${campaign ? ` campaña='${campaign}'` : ""} profile_hash=${profileHash.slice(0, 8)}…`;
+      return {
+        content: [{ type: "text", text: `${text}\n${summaryText({ id, code, tenant, crop, campaign, modules, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash })}` }],
+        structuredContent: { id, code, tenant, crop, campaign: campaign ?? null, modules, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash } as unknown as Record<string, unknown>,
+      };
     },
   );
 
-  // — close_campaign ---------------------------------------------------------
+  // — close_batch (ADR-0024) ---------------------------------------------------
   server.registerTool(
-    "close_campaign",
+    "close_batch",
     {
-      title: "Cerrar campaña",
-      description: "Cierra la campaña abierta del tenant. Calcula memory_hash_close (sha256 de MEMORY.md al cerrar). Error si no hay abierta.",
+      title: "Cerrar lote de producción",
+      description: "Cierra un lote activo con razón (cosecha|venta|perdida|otro) — la razón alimenta el margen y el aprendizaje entre ciclos. Calcula memory_hash_close (sha256 de MEMORY.md al cerrar). Error si no existe o ya está cerrado.",
       inputSchema: {
-        tenant: z.string().describe("Tenant"),
+        id: z.string().uuid().describe("Id del lote"),
+        reason: z.enum(["cosecha", "venta", "perdida", "otro"]).describe("Razón de cierre"),
         note: z.string().optional().describe("Nota opcional de cierre"),
       },
     },
-    async ({ tenant, note }) => {
-      const current = await getCurrentCampaignDb(tenant);
-      if (!current) {
-        const text = `no hay campaña abierta para tenant=${tenant}`;
+    async ({ id, reason, note }) => {
+      const batch = await getBatchDb(id);
+      if (!batch) {
         return {
-          content: [{ type: "text", text }],
-          structuredContent: { error: "no_open_campaign", tenant } as unknown as Record<string, unknown>,
+          content: [{ type: "text", text: `lote no existe: ${id}` }],
+          structuredContent: { error: "batch_not_found", id } as unknown as Record<string, unknown>,
         };
       }
-      const memoryHashClose = await computeMemoryHash(current.crop);
-      const row = await closeCampaignDb(current.id, memoryHashClose, note ?? null);
-      const text = `Campaña cerrada ${row.id} tenant=${tenant}`;
+      if (batch.state !== "open") {
+        return {
+          content: [{ type: "text", text: `lote ya cerrado: ${batch.code} (${batch.closed_at?.toISOString()})` }],
+          structuredContent: { error: "batch_already_closed", id, code: batch.code } as unknown as Record<string, unknown>,
+        };
+      }
+      const memoryHashClose = await computeMemoryHash(batch.crop);
+      const row = await closeBatchDb(id, reason, memoryHashClose, note ?? null);
+      const text = `Lote cerrado ${row?.code ?? id} razón=${reason}`;
       return {
-        content: [{ type: "text", text: `${text}\n${summaryText({ id: row.id, closed_at: row.closed_at, memory_hash_close: memoryHashClose })}` }],
-        structuredContent: { id: row.id, tenant, closed_at: row.closed_at, memory_hash_close: memoryHashClose } as unknown as Record<string, unknown>,
+        content: [{ type: "text", text: `${text}\n${summaryText({ id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose })}` }],
+        structuredContent: { id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose } as unknown as Record<string, unknown>,
       };
     },
   );
 
-  // — current_campaign -------------------------------------------------------
+  // — list_batches (ADR-0024) --------------------------------------------------
   server.registerTool(
-    "current_campaign",
+    "list_batches",
     {
-      title: "Campaña actual",
-      description: "Retorna la campaña abierta (state='open') para el tenant, o null si no hay. Si tenant se omite, busca globalmente.",
+      title: "Lotes de producción",
+      description: "Lista lotes (activos primero), filtrable por tenant y estado. La campaña es etiqueta lógica — agrupa en reportes, no gobierna.",
       inputSchema: {
-        tenant: z.string().optional().describe("Tenant; si se omite retorna la única abierta global si existe"),
+        tenant: z.string().optional().describe("Tenant; si se omite lista todas las fincas"),
+        state: z.enum(["open", "closed"]).optional().describe("Filtrar por estado"),
       },
     },
-    async ({ tenant }) => {
-      const row = await getCurrentCampaignDb(tenant);
-      if (!row) {
-        return {
-          content: [{ type: "text", text: `Sin campaña abierta${tenant ? ` tenant=${tenant}` : ""}` }],
-          structuredContent: { found: false, campaign: null } as unknown as Record<string, unknown>,
-        };
-      }
-      return {
-        content: [{ type: "text", text: `Campaña abierta ${row.id} tenant=${row.tenant} crop=${row.crop}\n${summaryText(row)}` }],
-        structuredContent: { found: true, campaign: row } as unknown as Record<string, unknown>,
-      };
-    },
-  );
-
-  // — list_campaigns ---------------------------------------------------------
-  server.registerTool(
-    "list_campaigns",
-    {
-      title: "Historial de campañas",
-      description: "Lista historial de campañas (abiertas y cerradas), opcionalmente filtrado por tenant.",
-      inputSchema: {
-        tenant: z.string().optional().describe("Tenant; si se omite lista todas"),
-      },
-    },
-    async ({ tenant }) => {
-      const rows = await listCampaignsDb(tenant);
-      const text = `Campañas${tenant ? ` tenant=${tenant}` : ""}: ${rows.length}`;
+    async ({ tenant, state }) => {
+      const rows = await listBatchesDb(tenant, state);
+      const text = `Lotes${tenant ? ` tenant=${tenant}` : ""}${state ? ` state=${state}` : ""}: ${rows.length}`;
       return {
         content: [{ type: "text", text: `${text}\n${summaryText(rows)}` }],
-        structuredContent: { campaigns: rows } as unknown as Record<string, unknown>,
+        structuredContent: { lotes: rows } as unknown as Record<string, unknown>,
       };
     },
   );
@@ -534,7 +530,7 @@ export function createMcpServer(): McpServer {
     {
       title: "Actualizar módulo",
       description:
-        "Renombra un módulo y/o cambia su cultivo. Reglas: módulo retirado no se edita; cambio de cultivo bloqueado si el módulo está en la campaña abierta (congelamiento ADR-0021). Al renombrar, el router refresca el nombre/área en Home Assistant.",
+        "Renombra un módulo y/o cambia su cultivo. Reglas: módulo retirado no se edita; cambio de cultivo bloqueado si el módulo está en un lote activo (congelamiento ADR-0024). Al renombrar, el router refresca el nombre/área en Home Assistant.",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         module: z.string().describe("Id técnico del módulo (mod-N)"),
@@ -571,12 +567,12 @@ export function createMcpServer(): McpServer {
           };
         }
         if (crop !== mod.crop) {
-          const campaign = await getOpenCampaignWithModuleDb(tenant, moduleId);
-          if (campaign) {
-            const text = `cambio de cultivo bloqueado: ${moduleId} está en la campaña abierta ${campaign.id} — cierra la campaña primero`;
+          const batch = await getOpenBatchWithModuleDb(tenant, moduleId);
+          if (batch) {
+            const text = `cambio de cultivo bloqueado: ${moduleId} está en el lote activo ${batch.code} — cierra el lote primero`;
             return {
               content: [{ type: "text", text }],
-              structuredContent: { error: "module_in_open_campaign", tenant, module: moduleId, campaign_id: campaign.id } as unknown as Record<string, unknown>,
+              structuredContent: { error: "module_in_open_batch", tenant, module: moduleId, batch_id: batch.id, code: batch.code } as unknown as Record<string, unknown>,
             };
           }
         }
@@ -596,7 +592,7 @@ export function createMcpServer(): McpServer {
     {
       title: "Retirar módulo",
       description:
-        "Retira un módulo (retired_at). NADA se borra (ADR-0011 aplicado a dominio): conserva telemetría, alertas e historia financiera. Deja de aceptar telemetría/claiming y sale de HA. Bloqueado si está en la campaña abierta (ADR-0021).",
+        "Retira un módulo (retired_at). NADA se borra (ADR-0011 aplicado a dominio): conserva telemetría, alertas e historia financiera. Deja de aceptar telemetría/claiming y sale de HA. Bloqueado si está en un lote activo (ADR-0024).",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         module: z.string().describe("Id técnico del módulo (mod-N)"),
@@ -616,12 +612,12 @@ export function createMcpServer(): McpServer {
           structuredContent: { error: "module_already_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
         };
       }
-      const campaign = await getOpenCampaignWithModuleDb(tenant, moduleId);
-      if (campaign) {
-        const text = `retiro bloqueado: ${moduleId} está en la campaña abierta ${campaign.id} — cierra la campaña primero`;
+      const batch = await getOpenBatchWithModuleDb(tenant, moduleId);
+      if (batch) {
+        const text = `retiro bloqueado: ${moduleId} está en el lote activo ${batch.code} — cierra el lote primero`;
         return {
           content: [{ type: "text", text }],
-          structuredContent: { error: "module_in_open_campaign", tenant, module: moduleId, campaign_id: campaign.id } as unknown as Record<string, unknown>,
+          structuredContent: { error: "module_in_open_batch", tenant, module: moduleId, batch_id: batch.id, code: batch.code } as unknown as Record<string, unknown>,
         };
       }
       const row = await retireModuleDb(tenant, moduleId);

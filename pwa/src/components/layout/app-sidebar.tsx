@@ -18,6 +18,7 @@ const NAV_MAIN = [
 ] as const;
 
 const NAV_OPS = [
+  { to: "/produccion", label: "Producción", icon: Sprout },
   { to: "/aprobaciones", label: "Aprobaciones", icon: CheckSquare },
   { to: "/finanzas", label: "Finanzas", icon: Wallet },
   { to: "/camaras", label: "Cámaras", icon: Camera },
@@ -75,7 +76,7 @@ export function AppSidebar() {
               </div>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-semibold">terraOS</span>
-                <span className="truncate text-xs text-muted-foreground">{kpis?.campaign ? `campaña ${kpis.campaign.crop}` : "panel de control"}</span>
+                <span className="truncate text-xs text-muted-foreground">{kpis?.batches.open ? `${kpis.batches.open} ${kpis.batches.open === 1 ? "lote activo" : "lotes activos"}` : "panel de control"}</span>
               </div>
             </SidebarMenuButton>
           </SidebarMenuItem>

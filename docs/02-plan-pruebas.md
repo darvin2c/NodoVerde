@@ -69,13 +69,13 @@ Cada fase tiene dos verificaciones: **manual** (lo que tú ves y tocas) y **auto
 
 ## Fase 4 — Campaña con pausas honestas (~45 días de reloj sim, ciclo lechuga; ADR-0021)
 
-**Prerequisitos de código (nivel 2-3, acelerados):** catch-up del sim al reanudar (apagado de 8 h → el mundo vivió la noche, la confianza cae y se recupera sola con lecturas frescas), alerta `data_gap` en el arranque, alerta `cmd_sin_policy` del router, cron de tokens → movimiento `software` diario, chequeo `invariant_ledger` en finance, `open/close_campaign` con hash de perfil y memoria.
+**Prerequisitos de código (nivel 2-3, acelerados):** catch-up del sim al reanudar (apagado de 8 h → el mundo vivió la noche, la confianza cae y se recupera sola con lecturas frescas), alerta `data_gap` en el arranque, alerta `cmd_sin_policy` del router, cron de tokens → movimiento `software` diario, chequeo `invariant_ledger` en finance, `open/close_batch` con hash de perfil y memoria (ADR-0024).
 
 | Manual | Automática |
 |---|---|
 | Revisión semanal: memoria del experto (Markdown) + decisiones tomadas | Invariantes continuas, cada una validada por su dueño (ADR-0021): imputación 100% (finance), cero comandos sin policy (router), presupuesto de tokens en USD/mes (cron) → alertas con estado pendiente/resuelta |
 | Protocolo de pausas: apagado nocturno → el reporte declara el gap ("sin datos de X a Y"); caída parcial semanal del sim → oficina activa (pide fotos/mediciones), finanzas siguen | Reincorporación: gap detectado y reportado, confianza se recupera con datos nuevos, portero bloquea actuación mientras confianza baja (ADR-0010) |
-| Al cierre: ¿el experto destiló lecciones correctas? ¿la campaña quedó registrada con perfil + memoria? | Grafana: histórico de confianza por módulo |
+| Al cierre: ¿el experto destiló lecciones correctas? ¿los lotes quedaron registrados con perfil + memoria (un lote por ciclo, campaña como etiqueta, ADR-0024)? | Grafana: histórico de confianza por módulo |
 
 **Criterio de salida (decidible):** 45 días de sim completos con **cero alertas de invariante en estado pendiente al cierre**. Una violación detectada y corregida (ej: movimiento anulado + recreado, ADR-0011) no invalida la fase.
 

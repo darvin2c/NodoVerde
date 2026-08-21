@@ -110,11 +110,14 @@ describe("overview.kpis", () => {
     const caller = callerWith(mockDb([{
       total_modules: 4, open_warn: 2, open_critical: 1, today_spend: "55.20", last_telemetry: "2026-08-19T10:00:00Z"
     }]));
-    // campaigns query (segunda llamada): sin campaña abierta
+    // lotes query (segunda llamada): dos lotes activos, el primero con fin esperado
     const db = {
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ total_modules: 4, open_warn: 2, open_critical: 1, today_spend: "55.20", last_telemetry: "2026-08-19T10:00:00Z" }] })
-        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [
+          { code: "LOTE-0003", crop: "lechuga", expected_end_at: "2026-10-05T00:00:00Z" },
+          { code: "LOTE-0004", crop: "tomate", expected_end_at: null }
+        ] })
     };
     void caller;
     const caller2 = callerWith(db);
@@ -123,7 +126,8 @@ describe("overview.kpis", () => {
     expect(kpis.openAlerts).toEqual({ warn: 2, critical: 1 });
     expect(kpis.todaySpend).toBe(55.2);
     expect(kpis.pendingApprovals).toBe(2);
-    expect(kpis.campaign).toBeNull();
+    expect(kpis.batches.open).toBe(2);
+    expect(kpis.batches.nextHarvest).toMatchObject({ code: "LOTE-0003", crop: "lechuga" });
   });
 
   it("portero inalcanzable → policyReachable false, no rompe", async () => {

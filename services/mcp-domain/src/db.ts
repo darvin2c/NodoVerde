@@ -59,7 +59,7 @@ export async function listModulesDb(tenant?: string): Promise<{ tenant: string; 
 }
 
 export async function getCropProfileDb(name: string): Promise<Record<string, unknown> | null> {
-  const r = await queryReadOnly(`SELECT name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, notes FROM crop_profiles WHERE name = $1`, [name]);
+  const r = await queryReadOnly(`SELECT name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes FROM crop_profiles WHERE name = $1`, [name]);
   return r.rows[0] ?? null;
 }
 

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 
-import { isValidHwId, nextModuleId, moduleInCampaign } from "../src/write.js";
+import { isValidHwId, nextModuleId, moduleInBatch } from "../src/write.js";
 
 // Lógica pura del provisionamiento gobernado de módulos (ADR-0022).
-// Las reglas duras (bloqueo por campaña abierta, un fierro por módulo) viven en
+// Las reglas duras (bloqueo por lote activo, un fierro por módulo) viven en
 // código aquí y en los statements de write.ts — jamás en una skill (ADR-0019).
 
 describe("isValidHwId — formato de fábrica", () => {
@@ -44,23 +44,23 @@ describe("nextModuleId — id técnico autogenerado", () => {
   });
 });
 
-describe("moduleInCampaign — congelamiento ADR-0021", () => {
+describe("moduleInBatch — congelamiento ADR-0024", () => {
   it("módulo dentro de la lista congelada → true", () => {
-    expect(moduleInCampaign(["mod-1", "mod-2"], "mod-2")).toBe(true);
+    expect(moduleInBatch(["mod-1", "mod-2"], "mod-2")).toBe(true);
   });
 
   it("módulo fuera de la lista → false", () => {
-    expect(moduleInCampaign(["mod-1", "mod-2"], "mod-3")).toBe(false);
+    expect(moduleInBatch(["mod-1", "mod-2"], "mod-3")).toBe(false);
   });
 
   it("acepta modules como string JSON (pg TEXT) o array (pg JSONB)", () => {
-    expect(moduleInCampaign('["mod-1"]', "mod-1")).toBe(true);
-    expect(moduleInCampaign(["mod-1"], "mod-1")).toBe(true);
+    expect(moduleInBatch('["mod-1"]', "mod-1")).toBe(true);
+    expect(moduleInBatch(["mod-1"], "mod-1")).toBe(true);
   });
 
   it("payload roto → false (defensivo, nunca lanza)", () => {
-    expect(moduleInCampaign("no-json", "mod-1")).toBe(false);
-    expect(moduleInCampaign(null, "mod-1")).toBe(false);
-    expect(moduleInCampaign({ a: 1 }, "mod-1")).toBe(false);
+    expect(moduleInBatch("no-json", "mod-1")).toBe(false);
+    expect(moduleInBatch(null, "mod-1")).toBe(false);
+    expect(moduleInBatch({ a: 1 }, "mod-1")).toBe(false);
   });
 });

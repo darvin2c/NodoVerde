@@ -52,9 +52,9 @@ status: vigente
 
 ### Fase 4 — Campaña con pausas honestas (ADR-0021)
 - Simulador una temporada completa (ciclo lechuga ~45 días **de reloj sim**). Admite apagados declarados en workstation: pausas totales nocturnas + una caída parcial semanal del sim con stack vivo — las pausas son parte del protocolo (matriz de degradación ADR-0010), no violaciones.
-- Prerequisitos de código (verificables acelerado): catch-up del sim al reanudar (el mundo vive la pausa, el reloj se resincroniza), alerta `data_gap` en watchdog, alerta `cmd_sin_policy` en router, cron de tokens determinístico, tabla `campaigns` + `open/close_campaign`, chequeo `invariant_ledger` en finance.
+- Prerequisitos de código (verificables acelerado): catch-up del sim al reanudar (el mundo vive la pausa, el reloj se resincroniza), alerta `data_gap` en watchdog, alerta `cmd_sin_policy` en router, cron de tokens determinístico, tabla `lotes` + `open/close_batch` (ADR-0024: el ciclo biológico es la entidad; la campaña es etiqueta lógica), chequeo `invariant_ledger` en finance.
 - Invariantes, cada una validada por su dueño y publicada al topic `alert` con estado pendiente/resuelta: finance → imputación 100%; router → cero comandos sin policy; cron → presupuesto de tokens (techo USD/mes).
-- **Criterio de salida:** campaña completa con **cero alertas de invariante sin resolver al cierre** (una alerta corregida no invalida).
+- **Criterio de salida:** temporada completa (lotes sucesivos del sim, ADR-0024) con **cero alertas de invariante sin resolver al cierre** (una alerta corregida no invalida).
 
 ### Fase 5 — Hardware real (piloto mínimo)
 - 1 ESP32 flasheado con el YAML ESPHome de la Fase 0 + 1 sensor EC + 1 dosificadora.
@@ -73,7 +73,7 @@ status: vigente
 | Pieza | Trigger de entrada |
 |---|---|
 | Policy module → servicio separado | Multi-finca operativo |
-| Learning loop (destilación automática, estilo Hermes) | ≥1 campaña de decisiones registradas (tabla `campaigns` + audit del portero, ADR-0021) |
+| Learning loop (destilación automática, estilo Hermes) | ≥1 temporada de decisiones registradas (tabla `lotes` + audit del portero, ADR-0021/0024) |
 | IA generativa para fotos del sim | Pipeline de visión funcionando |
 | Escenarios generados por LLM | Los escenarios YAML se quedan cortos |
 | OpenAPI | Primera API REST real |

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS crop_profiles (
   ph_max DOUBLE PRECISION NOT NULL,
   water_temp_min DOUBLE PRECISION NOT NULL,
   water_temp_max DOUBLE PRECISION NOT NULL,
+  cycle_days INT,                 -- duración del ciclo (trasplante/siembra → cosecha); null = sin estimación
   notes TEXT
 );
 
@@ -264,9 +265,9 @@ INSERT INTO tenants (id, name, location_name, lat, lon, tz) VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- Seed: perfiles de cultivo (fuente de verdad en runtime para cerebro/portero; ADR-0016)
-INSERT INTO crop_profiles (name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, notes) VALUES
-  ('lechuga', 1.2, 1.8, 5.8, 6.3, 18, 24, 'Lechuga hidropónica de hoja suelta; ciclo ~45 días. EC baja al inicio, subir a 1.6 en engorde. Renovar solución si EC deriva.'),
-  ('tomate', 2.0, 3.5, 5.5, 6.5, 18, 26, 'Tomate indeterminado hidropónico; EC se eleva progresivamente con carga de frutos. Vigilar blossom-end rot si EC/pH fuera de rango.')
+INSERT INTO crop_profiles (name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes) VALUES
+  ('lechuga', 1.2, 1.8, 5.8, 6.3, 18, 24, 45, 'Lechuga hidropónica de hoja suelta; ciclo ~45 días. EC baja al inicio, subir a 1.6 en engorde. Renovar solución si EC deriva.'),
+  ('tomate', 2.0, 3.5, 5.5, 6.5, 18, 26, 90, 'Tomate indeterminado hidropónico; EC se eleva progresivamente con carga de frutos. Vigilar blossom-end rot si EC/pH fuera de rango.')
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO modules (tenant, id, name, crop) VALUES
@@ -426,23 +427,31 @@ CREATE TRIGGER trg_action_requests_transition
   FOR EACH ROW EXECUTE FUNCTION enforce_action_request_transition();
 
 
--- ── Fase 4 "Campaña con pausas honestas" (ADR-0021) ─────────────────────────
+-- ── Fase 4 "Campaña con pausas honestas" (ADR-0021) / Lotes de producción (ADR-0024) ──
 -- alerts ya no tiene FK a modules (module='platform' para alertas de plataforma)
--- campaigns + alert_resolutions son la única excepción de escritura gobernada en mcp-domain (write.ts)
-CREATE TABLE IF NOT EXISTS campaigns (
+-- lotes + alert_resolutions son la única excepción de escritura gobernada en mcp-domain (write.ts)
+-- Modelo fábrica: el lote es el ciclo productivo real; la campaña es etiqueta lógica libre.
+-- Regla física (validada en código al abrir): un módulo solo está en UN lote activo.
+CREATE TABLE IF NOT EXISTS lotes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT NOT NULL,                       -- correlativo legible: LOTE-0001
   tenant TEXT NOT NULL,
   crop TEXT NOT NULL REFERENCES crop_profiles(name),
-  modules JSONB NOT NULL,
-  profile_hash TEXT NOT NULL,
-  memory_hash TEXT,
-  memory_hash_close TEXT,
-  note TEXT,
-  opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  campaign TEXT,                            -- etiqueta lógica libre; null = sin campaña
+  modules JSONB NOT NULL,                   -- ["mod-1","mod-2"] — uno o varios, explícitos al abrir
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expected_end_at TIMESTAMPTZ,              -- started_at + crop_profiles.cycle_days (null si perfil sin ciclo)
   closed_at TIMESTAMPTZ,
+  close_reason TEXT CHECK (close_reason IN ('cosecha','venta','perdida','otro')),
+  profile_hash TEXT NOT NULL,               -- sha256 del perfil al abrir (comparabilidad ADR-0012)
+  memory_hash TEXT,                         -- sha256 MEMORY.md del experto al abrir (null honesto)
+  memory_hash_close TEXT,                   -- idem al cerrar
+  note TEXT,
   state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','closed'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS campaigns_one_open_per_tenant ON campaigns (tenant) WHERE state = 'open';
+CREATE UNIQUE INDEX IF NOT EXISTS lotes_code_unique ON lotes (code);
+CREATE INDEX IF NOT EXISTS idx_lotes_tenant_state ON lotes (tenant, state);
+CREATE SEQUENCE IF NOT EXISTS lotes_code_seq;
 
 CREATE TABLE IF NOT EXISTS alert_resolutions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

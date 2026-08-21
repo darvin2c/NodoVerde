@@ -51,6 +51,8 @@ status: vigente
 | **Orquestador** | El administrador: habla contigo, lleva las finanzas, coordina expertos. Único que presenta propuestas al portero |
 | **Experto por cultivo** | Agente con playbook y memoria propia por cultivo. Aprende de cada ciclo cerrado; propone, jamás ejecuta |
 | **Playbook** | Guía Markdown del cultivo: síntomas, plagas, recetas de solución. Lo que carga el experto para volverse especialista |
+| **Lote de producción** | El ciclo biológico real (ADR-0024): cultivo/programa + módulos explícitos + fechas propias de inicio y cierre con razón (cosecha/venta/pérdida). Un lote puede ocupar uno o varios módulos; un módulo solo aloja UN lote activo. Escalonado natural: cada trasplante es un lote nuevo. Escala a pecuario: pollada, piara, lactancia de una vaca — todo es un lote |
+| **Campaña (etiqueta)** | Solo una etiqueta lógica libre en el lote ("invierno-2026"), sin tabla ni ciclo de vida (ADR-0024): agrupa lotes para comparar temporadas en reportes. Los costos imputan al lote; la campaña agrega, jamás recibe imputaciones |
 | **Aprendizaje por ciclo cerrado** | Al terminar la cosecha, el experto destila lecciones a su memoria. Solo cuentan decisiones con resultado conocido |
 | **Reloj dual** | El simulador corre a velocidad real (campaña de meses) o acelerado (1 día = 1 minuto) para pruebas |
 | **MCP** | Enchufe estándar por el que el cerebro usa herramientas (consultar clima, registrar gasto). Un solo tipo de enchufe |

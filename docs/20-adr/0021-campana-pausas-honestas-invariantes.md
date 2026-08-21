@@ -6,6 +6,7 @@ tags: [adr, campaña, invariantes, confianza, reloj-de-datos, tokens, fase4]
 created: 2026-08-18
 status: aceptado
 amplia: ADR-0004, ADR-0010, ADR-0011
+superseded_parcial: "ADR-0024 (el registro de campaña — tabla campaigns y tools open/close_campaign — es reemplazado por lotes de producción; pausas honestas, invariantes por dueño y cron de tokens siguen vigentes)"
 ---
 
 # ADR-0021: Campaña con pausas honestas e invariantes gobernadas
@@ -61,6 +62,8 @@ Watchdog y Grafana solo visualizan/alertan umbrales — no conocen reglas de dom
 - Techo en **USD/mes**, valor en configuración; se calibra con 1-2 semanas de datos reales de la campaña. La alerta `budget_tokens` no bloquea nada — informa (ADR-0010: el freno de mano es la confianza, no el gasto).
 
 ### 5. Registro de campaña (materializa ADR-0012)
+
+> **SUPERSEDED por ADR-0024 (2026-08-21).** La tabla `campaigns` y los tools `open/close_campaign` fueron reemplazados por **lotes de producción** (`lotes`, `open/close_batch`): el ciclo biológico es la entidad y la campaña es etiqueta lógica libre. Los hashes de perfil y memoria se conservan por lote. El texto original queda como registro histórico:
 
 - Tabla `campaigns` (prefijo de dominio, con `tenant_id`): cultivo, módulos, **hash del perfil YAML**, **snapshot/hash de la memoria del experto**, fechas de inicio/cierre, estado.
 - Herramientas MCP `open_campaign` / `close_campaign` en el servicio de dominio; los hashes se calculan en código al abrir/cerrar.
