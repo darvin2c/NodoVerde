@@ -205,18 +205,31 @@ export async function insertBatchDb(fields: {
   crop: string;
   campaign: string | null;
   modulesJson: string;
+  startedAt: Date;
   expectedEndAt: Date | null;
   profileHash: string;
   memoryHash: string | null;
   note: string | null;
 }): Promise<{ id: string; code: string }> {
   const r = await writePool.query(
-    `INSERT INTO lotes (code, tenant, crop, campaign, modules, expected_end_at, profile_hash, memory_hash, note)
-     VALUES ('LOTE-' || lpad(nextval('lotes_code_seq')::text, 4, '0'), $1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+    `INSERT INTO lotes (code, tenant, crop, campaign, modules, started_at, expected_end_at, profile_hash, memory_hash, note)
+     VALUES ('LOTE-' || lpad(nextval('lotes_code_seq')::text, 4, '0'), $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)
      RETURNING id, code`,
-    [fields.tenant, fields.crop, fields.campaign, fields.modulesJson, fields.expectedEndAt, fields.profileHash, fields.memoryHash, fields.note],
+    [fields.tenant, fields.crop, fields.campaign, fields.modulesJson, fields.startedAt, fields.expectedEndAt, fields.profileHash, fields.memoryHash, fields.note],
   );
   return r.rows[0] as unknown as { id: string; code: string };
+}
+
+/**
+ * Retira un módulo del lote sin cerrarlo (ADR-0026). UPDATE solo si el lote
+ * sigue abierto; la lista nueva la calcula canRemoveModuleFromBatch (regla dura).
+ */
+export async function removeModuleFromBatchDb(id: string, remainingJson: string): Promise<{ id: string; code: string } | null> {
+  const r = await writePool.query(
+    `UPDATE lotes SET modules = $2::jsonb WHERE id = $1 AND state = 'open' RETURNING id, code`,
+    [id, remainingJson],
+  );
+  return (r.rows[0] as unknown as { id: string; code: string }) ?? null;
 }
 
 export async function closeBatchDb(
@@ -352,6 +365,34 @@ export function moduleInBatch(batchModules: unknown, moduleId: string): boolean 
     return Array.isArray(arr) && arr.includes(moduleId);
   } catch {
     return false;
+  }
+}
+
+/**
+ * Fin esperado del lote (ADR-0026): el override manual del humano gana;
+ * sin override, inicio + cycle_days del perfil; null si el perfil no tiene ciclo.
+ */
+export function computeExpectedEnd(startedAt: Date, cycleDays: number | null, overrideEnd: Date | null): Date | null {
+  if (overrideEnd) return overrideEnd;
+  if (cycleDays == null) return null;
+  return new Date(startedAt.getTime() + cycleDays * 86400000);
+}
+
+/**
+ * Retiro de un módulo sin cerrar el lote (ADR-0026). La última mesa no se
+ * retira — un lote sin mesas no es un lote: se cierra con close_batch.
+ */
+export function canRemoveModuleFromBatch(
+  batchModules: unknown,
+  moduleId: string,
+): { ok: true; remaining: string[] } | { ok: false; reason: "module_not_in_batch" | "last_module" } {
+  try {
+    const arr = typeof batchModules === "string" ? JSON.parse(batchModules) : batchModules;
+    if (!Array.isArray(arr) || !arr.includes(moduleId)) return { ok: false, reason: "module_not_in_batch" };
+    if (arr.length === 1) return { ok: false, reason: "last_module" };
+    return { ok: true, remaining: arr.filter((m) => m !== moduleId) };
+  } catch {
+    return { ok: false, reason: "module_not_in_batch" };
   }
 }
 

@@ -7,7 +7,7 @@ import { getDb, type TerraDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
-import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant, openBatch, closeBatch, createCropProfile, updateCropProfile } from "./mcpDomain.js";
+import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant, openBatch, closeBatch, removeModuleFromBatch, createCropProfile, updateCropProfile } from "./mcpDomain.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -825,7 +825,9 @@ export const appRouter = t.router({
         crop: z.string().min(1),
         modules: z.array(z.string()).min(1),
         campaign: z.string().optional(),
-        note: z.string().optional()
+        note: z.string().optional(),
+        started_at: z.string().optional(),
+        expected_end_at: z.string().optional()
       }))
       .mutation(async ({ input }) => openBatch(input)),
 
@@ -835,7 +837,14 @@ export const appRouter = t.router({
         reason: z.enum(["cosecha", "venta", "perdida", "otro"]),
         note: z.string().optional()
       }))
-      .mutation(async ({ input }) => closeBatch(input))
+      .mutation(async ({ input }) => closeBatch(input)),
+
+    removeModule: t.procedure
+      .input(z.object({
+        id: z.string().uuid(),
+        module: z.string().min(1)
+      }))
+      .mutation(async ({ input }) => removeModuleFromBatch(input))
   }),
 
   overview: t.router({
