@@ -145,14 +145,16 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => archiveTenant(input))
   }),
 
-  // ── FARMS: resumen agregado multi-finca para el Overview en modo "Todas" (ADR-0023) ──
+  // ── FARMS: pulso multi-finca para el Overview en modo "Todas" (ADR-0023) ──
+  // Cada sección degrada honesta por separado: si una query falla, esa parte es null, no todo el resumen.
   farms: t.router({
     summary: t.procedure.query(async ({ ctx }) => {
       const db = rawDb(ctx.db);
-      let rows: Array<{
+      type FarmRow = {
         id: string; name: string; location_name: string | null; currency: string;
         total_modules: number; open_warn: number; open_critical: number; today_spend: string;
-      }> = [];
+      };
+      let rows: FarmRow[] = [];
       try {
         const res = await db.execute(sql`
           SELECT t.id, t.name, t.location_name, t.currency,
@@ -173,10 +175,118 @@ export const appRouter = t.router({
                AND ts::date = now()::date AND voided_by IS NULL AND anula_a IS NULL) AS today_spend
           FROM tenants t WHERE t.archived_at IS NULL ORDER BY t.id
         `);
-        rows = res.rows as typeof rows;
+        rows = res.rows as FarmRow[];
       } catch { /* lista vacía = honesto */ }
+      if (rows.length === 0) return [];
 
-      // Confianza media por finca (vivo vía MQTT)
+      // Peor alerta abierta por finca (critical primero, luego la más reciente)
+      const worstAlert = new Map<string, { name: string; severity: string; module: string; time: string }>();
+      try {
+        const res = await db.execute(sql`
+          SELECT DISTINCT ON (a.tenant) a.tenant, a.name, a.severity, a.module, a.time
+          FROM alerts a
+          WHERE a.severity IN ('warn','critical')
+            AND a.time > now() - interval '24 hours'
+            AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
+            AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
+               AND (r.module IS NULL OR r.module = a.module)
+               AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))
+          ORDER BY a.tenant, CASE a.severity WHEN 'critical' THEN 0 ELSE 1 END, a.time DESC
+        `);
+        for (const r of res.rows as Array<{ tenant: string; name: string; severity: string; module: string; time: string }>) {
+          worstAlert.set(r.tenant, { name: r.name, severity: r.severity, module: r.module, time: r.time });
+        }
+      } catch { /* sin peor alerta = sección null */ }
+
+      // Lecturas EC/pH/nivel vs rangos del cultivo: por finca se muestra el MÓDULO PEOR (fuera de rango gana)
+      type MetricState = { value: number; status: "ok" | "warn"; module: string } | null;
+      const readingsByFarm = new Map<string, { ec: MetricState; ph: MetricState; level: MetricState }>();
+      try {
+        const res = await db.execute(sql`
+          SELECT lr.tenant, lr.module, lr.metric, lr.value,
+                 cp.ec_min, cp.ec_max, cp.ph_min, cp.ph_max
+          FROM (
+            SELECT DISTINCT ON (tenant, module, metric) tenant, module, metric, value
+            FROM telemetry WHERE metric IN ('ec','ph','level')
+            ORDER BY tenant, module, metric, time DESC
+          ) lr
+          JOIN modules m ON m.tenant = lr.tenant AND m.id = lr.module AND m.retired_at IS NULL
+          JOIN crop_profiles cp ON cp.crop = m.crop
+        `);
+        for (const r of res.rows as Array<{
+          tenant: string; module: string; metric: string; value: number | null;
+          ec_min: number | null; ec_max: number | null; ph_min: number | null; ph_max: number | null;
+        }>) {
+          if (r.value == null) continue;
+          const acc = readingsByFarm.get(r.tenant) ?? { ec: null, ph: null, level: null };
+          if (r.metric === "ec" || r.metric === "ph") {
+            const min = r.metric === "ec" ? r.ec_min : r.ph_min;
+            const max = r.metric === "ec" ? r.ec_max : r.ph_max;
+            const out = min != null && max != null && (r.value < min || r.value > max);
+            const cur = acc[r.metric];
+            // Gana el módulo fuera de rango; entre sanos, el primero
+            if (!cur || (out && cur.status === "ok")) {
+              acc[r.metric] = { value: r.value, status: out ? "warn" : "ok", module: r.module };
+            }
+          } else if (r.metric === "level") {
+            const cur = acc.level;
+            if (!cur || r.value < cur.value) acc.level = { value: r.value, status: r.value < 20 ? "warn" : "ok", module: r.module };
+          }
+          readingsByFarm.set(r.tenant, acc);
+        }
+      } catch { /* sin lecturas = sección null */ }
+
+      // Clima actual por finca (estación por módulo: última lectura de air_temp/humidity)
+      const climateByFarm = new Map<string, { airTemp: number | null; humidity: number | null; time: string }>();
+      try {
+        const res = await db.execute(sql`
+          SELECT DISTINCT ON (tenant, metric) tenant, metric, value, time
+          FROM telemetry WHERE metric IN ('air_temp','humidity')
+          ORDER BY tenant, metric, time DESC
+        `);
+        for (const r of res.rows as Array<{ tenant: string; metric: string; value: number | null; time: string }>) {
+          const acc = climateByFarm.get(r.tenant) ?? { airTemp: null, humidity: null, time: r.time };
+          if (r.metric === "air_temp") acc.airTemp = r.value;
+          if (r.metric === "humidity") acc.humidity = r.value;
+          if (r.time > acc.time) acc.time = r.time;
+          climateByFarm.set(r.tenant, acc);
+        }
+      } catch { /* sin clima = null */ }
+
+      // Sparkline de confianza 24h (media horaria por finca)
+      const confSeriesByFarm = new Map<string, Array<{ t: string; v: number }>>();
+      try {
+        const res = await db.execute(sql`
+          SELECT tenant, time_bucket('1 hour', time) AS h, AVG(value) AS v
+          FROM confidence_history
+          WHERE time > now() - interval '24 hours'
+          GROUP BY tenant, h ORDER BY tenant, h
+        `);
+        for (const r of res.rows as Array<{ tenant: string; h: string; v: number }>) {
+          const arr = confSeriesByFarm.get(r.tenant) ?? [];
+          arr.push({ t: r.h, v: Number(r.v) });
+          confSeriesByFarm.set(r.tenant, arr);
+        }
+      } catch { /* sin serie = [] */ }
+
+      // Gasto por día, últimos 7 días, por finca (su moneda — nunca se suma entre fincas)
+      const spend7dByFarm = new Map<string, Array<{ d: string; v: number }>>();
+      try {
+        const res = await db.execute(sql`
+          SELECT tenant, ts::date AS d, SUM(amount)::float8 AS v
+          FROM movements
+          WHERE kind = 'gasto' AND ts > now() - interval '7 days'
+            AND voided_by IS NULL AND anula_a IS NULL
+          GROUP BY tenant, d ORDER BY tenant, d
+        `);
+        for (const r of res.rows as Array<{ tenant: string; d: string; v: number }>) {
+          const arr = spend7dByFarm.get(r.tenant) ?? [];
+          arr.push({ d: r.d, v: Number(r.v) });
+          spend7dByFarm.set(r.tenant, arr);
+        }
+      } catch { /* sin serie = [] */ }
+
+      // Confianza media actual por finca (vivo vía MQTT)
       const confByTenant = new Map<string, { sum: number; n: number }>();
       for (const [key, c] of mqttBus.getLastConfidence()) {
         const tenant = key.split("/")[0];
@@ -195,7 +305,12 @@ export const appRouter = t.router({
           totalModules: r.total_modules,
           openAlerts: { warn: r.open_warn, critical: r.open_critical },
           todaySpend: Number(r.today_spend),
-          avgConfidence: conf && conf.n > 0 ? conf.sum / conf.n : null
+          avgConfidence: conf && conf.n > 0 ? conf.sum / conf.n : null,
+          worstAlert: worstAlert.get(r.id) ?? null,
+          readings: readingsByFarm.get(r.id) ?? { ec: null, ph: null, level: null },
+          climate: climateByFarm.get(r.id) ?? null,
+          confidenceSeries: confSeriesByFarm.get(r.id) ?? [],
+          spend7d: spend7dByFarm.get(r.id) ?? []
         };
       });
     })
@@ -604,6 +719,57 @@ export const appRouter = t.router({
   }),
   // ── OVERVIEW: KPIs de portada ──
   overview: t.router({
+    // ── Feed de actividad unificado: qué pasó mientras no mirabas ──
+    // Mezcla alertas + movimientos + acciones del portero + órdenes de trabajo.
+    // Cada item lleva su tenant; la UI etiqueta la finca. El amount viaja siempre con su currency (nunca se mezclan).
+    activity: t.procedure
+      .input(z.object({ tenant: z.string().optional(), limit: z.number().min(1).max(100).optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenant = input?.tenant ?? null;
+        const limit = input?.limit ?? 40;
+        try {
+          const res = await rawDb(ctx.db).execute(sql`
+            SELECT time, tenant, kind, ref, severity, module, device, meta
+            FROM (
+              SELECT a.time, a.tenant, 'alert'::text AS kind, a.name AS ref, a.severity, a.module, a.device,
+                     a.detail::jsonb AS meta
+              FROM alerts a WHERE a.time > now() - interval '7 days'
+                AND a.severity IN ('warn','critical')  -- info ("dispositivo recuperado") es ruido en el feed
+              UNION ALL
+              SELECT m.ts, m.tenant, 'movement', m.category, m.kind, NULL, NULL,
+                     jsonb_build_object('amount', m.amount, 'currency', m.currency, 'note', m.note,
+                                        'voided', (m.voided_by IS NOT NULL OR m.anula_a IS NOT NULL OR EXISTS (
+                                          SELECT 1 FROM movements v WHERE v.anula_a = m.id)))
+              FROM movements m WHERE m.ts > now() - interval '7 days'
+              UNION ALL
+              SELECT ar.created_at, ar.tenant, 'action', ar.action_class, ar.status, ar.module, ar.device,
+                     jsonb_build_object('requested_by', ar.requested_by, 'action', ar.action, 'reason', ar.reason,
+                                        'decided_by', ar.decided_by)
+              FROM action_requests ar WHERE ar.created_at > now() - interval '7 days'
+              UNION ALL
+              SELECT wo.created_at, wo.tenant, 'work_order', wo.kind, wo.status, wo.module, NULL,
+                     jsonb_build_object('instructions', wo.instructions, 'created_by', wo.created_by)
+              FROM work_orders wo WHERE wo.created_at > now() - interval '7 days'
+            ) feed
+            WHERE (${tenant}::text IS NULL OR tenant = ${tenant})
+            ORDER BY time DESC
+            LIMIT ${limit}
+          `);
+          return (res.rows as Array<Record<string, unknown>>).map((r) => ({
+            time: r.time as string,
+            tenant: r.tenant as string,
+            kind: r.kind as "alert" | "movement" | "action" | "work_order",
+            ref: r.ref as string,
+            severity: r.severity as string | null,
+            module: (r.module as string | null) ?? null,
+            device: (r.device as string | null) ?? null,
+            meta: typeof r.meta === "string" ? JSON.parse(r.meta as string) : (r.meta ?? {})
+          }));
+        } catch {
+          return [];
+        }
+      }),
+
     kpis: t.procedure
       .input(z.object({ tenant: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {

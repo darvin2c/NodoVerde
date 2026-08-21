@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Boxes, TriangleAlert, CheckSquare, Wallet, Gauge, Sprout, MapPinned } from "lucide-react";
+import { Boxes, TriangleAlert, CheckSquare, Wallet, Gauge, Sprout } from "lucide-react";
 import { trpc } from "../trpc.ts";
 import { useTenant } from "@/components/tenant-provider.tsx";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
-import { Progress } from "@/components/ui/progress.tsx";
+import { FarmCard, farmRankScore } from "@/components/farm-card.tsx";
+import { ActivityFeed } from "@/components/activity-feed.tsx";
 import { useLiveModules, healthVariant } from "@/lib/live.ts";
 import { remediationFor } from "@/lib/remediation.ts";
 import { formatMoney, formatDateTime, timeAgo } from "@/lib/format.ts";
@@ -54,46 +55,14 @@ export function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Modo "Todas las fincas": una tarjeta por finca (ADR-0023) */}
+      {/* Modo "Todas las fincas": triage peor-eslabón-primero (ADR-0023) */}
       {active === null && farmsSummary && farmsSummary.length > 0 && (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {farmsSummary.map((f) => {
-            const openN = f.openAlerts.warn + f.openAlerts.critical;
-            return (
-              <Card key={f.id} className="cursor-pointer hover:bg-accent/40 transition-colors" onClick={() => setActive(f.id)}>
-                <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-base flex items-center gap-1.5">
-                      <MapPinned className="size-4" /> {f.name}
-                    </CardTitle>
-                    <Badge variant={f.openAlerts.critical > 0 ? "destructive" : openN > 0 ? "secondary" : "outline"}>
-                      {openN > 0 ? `${openN} alertas` : "ok"}
-                    </Badge>
-                  </div>
-                  <CardDescription>{f.id}{f.locationName ? ` · ${f.locationName}` : ""}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-2 text-center text-sm">
-                    <div className="rounded-md border p-2">
-                      <p className="text-lg font-semibold">{f.totalModules}</p>
-                      <p className="text-[10px] text-muted-foreground uppercase">módulos</p>
-                    </div>
-                    <div className="rounded-md border p-2">
-                      <p className="text-lg font-semibold">{formatMoney(f.todaySpend, f.currency)}</p>
-                      <p className="text-[10px] text-muted-foreground uppercase">gasto hoy</p>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                      <span>confianza</span>
-                      <span>{f.avgConfidence != null ? `${Math.round(f.avgConfidence)}%` : "—"}</span>
-                    </div>
-                    <Progress value={f.avgConfidence ?? 0} />
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
+          {[...farmsSummary]
+            .sort((a, b) => farmRankScore(b) - farmRankScore(a))
+            .map((f, i) => (
+              <FarmCard key={f.id} farm={f} rank={i + 1} onSelect={() => setActive(f.id)} />
+            ))}
         </div>
       )}
 
@@ -174,37 +143,40 @@ export function OverviewPage() {
           </CardContent>
         </Card>
 
-        {/* Módulos en vivo */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Módulos</CardTitle>
-            <CardDescription>salud y confianza en vivo</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {Object.keys(live.health).length === 0 && (
-              <p className="text-sm text-muted-foreground">Sin datos de salud en vivo — ¿está corriendo el watchdog?</p>
-            )}
-            {Object.entries(live.health)
-              .filter(([key]) => active === null || key.startsWith(`${active}/`))
-              .map(([key, h]) => {
-              const mod = key.split("/")[1] ?? key;
-              const conf = live.confidence[key];
-              return (
-                <Link key={key} to="/modulos/$moduleId" params={{ moduleId: mod }}
-                  className="flex items-center justify-between gap-3 rounded-lg border p-3 hover:bg-accent/50 transition-colors">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">{moduleNames.get(key) ?? mod}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {active === null ? `${farmName(key.split("/")[0])} · ` : ""}{mod} · confianza {conf ? `${Math.round(conf.v)}%` : "—"}
-                    </p>
-                  </div>
-                  <Badge variant={healthVariant(h.state)}>{h.state}</Badge>
-                </Link>
-              );
-            })}
-          </CardContent>
-        </Card>
+        {/* Feed de actividad unificado */}
+        <ActivityFeed active={active} farmName={farmName} />
       </div>
+
+      {/* Módulos en vivo */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Módulos</CardTitle>
+          <CardDescription>salud y confianza en vivo</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {Object.keys(live.health).length === 0 && (
+            <p className="text-sm text-muted-foreground">Sin datos de salud en vivo — ¿está corriendo el watchdog?</p>
+          )}
+          {Object.entries(live.health)
+            .filter(([key]) => active === null || key.startsWith(`${active}/`))
+            .map(([key, h]) => {
+            const mod = key.split("/")[1] ?? key;
+            const conf = live.confidence[key];
+            return (
+              <Link key={key} to="/modulos/$moduleId" params={{ moduleId: mod }}
+                className="flex items-center justify-between gap-3 rounded-lg border p-3 hover:bg-accent/50 transition-colors">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{moduleNames.get(key) ?? mod}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {active === null ? `${farmName(key.split("/")[0])} · ` : ""}{mod} · confianza {conf ? `${Math.round(conf.v)}%` : "—"}
+                  </p>
+                </div>
+                <Badge variant={healthVariant(h.state)}>{h.state}</Badge>
+              </Link>
+            );
+          })}
+        </CardContent>
+      </Card>
 
       {/* Estado del sistema (compacto) */}
       <Card>

@@ -243,3 +243,97 @@ describe("farms.summary — resumen por finca (modo Todas)", () => {
     expect(res).toEqual([]);
   });
 });
+
+describe("farms.summary — pulso por finca (peor alerta, lecturas vs rango, series)", () => {
+  // El procedure lanza 6 queries en secuencia; mockResolvedValueOnce las encadena en orden.
+  function dbChain(...queries: unknown[][]) {
+    const execute = vi.fn();
+    for (const rows of queries) execute.mockResolvedValueOnce({ rows });
+    execute.mockResolvedValue({ rows: [] });
+    return { execute } as unknown as never;
+  }
+  const farmRows = [
+    { id: "demo", name: "Parcela Demo", location_name: "Lambayeque", currency: "PEN", total_modules: 2, open_warn: 1, open_critical: 0, today_spend: "30" }
+  ];
+
+  it("peor alerta: critical gana sobre warn aunque sea más vieja", async () => {
+    const db = dbChain(farmRows, [
+      { tenant: "demo", name: "ec_baja", severity: "critical", module: "mod-1", time: "2026-08-21T10:00:00Z" }
+    ]);
+    const res = await callerWith(db).farms.summary() as Array<{ worstAlert: { name: string; severity: string } | null }>;
+    expect(res[0].worstAlert).toMatchObject({ name: "ec_baja", severity: "critical" });
+  });
+
+  it("lecturas: el módulo fuera de rango gana sobre los sanos", async () => {
+    const db = dbChain(farmRows, [], [
+      { tenant: "demo", module: "mod-1", metric: "ec", value: 1.8, ec_min: 1.6, ec_max: 2.2, ph_min: 5.5, ph_max: 6.5 },
+      { tenant: "demo", module: "mod-2", metric: "ec", value: 1.2, ec_min: 1.6, ec_max: 2.2, ph_min: 5.5, ph_max: 6.5 },
+      { tenant: "demo", module: "mod-1", metric: "ph", value: 6.0, ec_min: 1.6, ec_max: 2.2, ph_min: 5.5, ph_max: 6.5 },
+      { tenant: "demo", module: "mod-2", metric: "level", value: 45, ec_min: 1.6, ec_max: 2.2, ph_min: 5.5, ph_max: 6.5 }
+    ]);
+    const res = await callerWith(db).farms.summary() as Array<{
+      readings: { ec: { value: number; status: string; module: string } | null; ph: { status: string } | null; level: { value: number } | null };
+    }>;
+    // mod-2 fuera de rango (1.2 < 1.6) gana sobre mod-1 sano
+    expect(res[0].readings.ec).toMatchObject({ value: 1.2, status: "warn", module: "mod-2" });
+    expect(res[0].readings.ph?.status).toBe("ok");
+    expect(res[0].readings.level).toMatchObject({ value: 45, status: "ok" });
+  });
+
+  it("clima: última lectura de air_temp y humidity por finca", async () => {
+    const db = dbChain(farmRows, [], [], [
+      { tenant: "demo", metric: "air_temp", value: 28.5, time: "2026-08-21T15:00:00Z" },
+      { tenant: "demo", metric: "humidity", value: 70, time: "2026-08-21T14:00:00Z" }
+    ]);
+    const res = await callerWith(db).farms.summary() as Array<{ climate: { airTemp: number; humidity: number } | null }>;
+    expect(res[0].climate).toMatchObject({ airTemp: 28.5, humidity: 70 });
+  });
+
+  it("series: sparkline de confianza y gasto 7d pasan tal cual, con números", async () => {
+    const db = dbChain(farmRows, [], [], [], [
+      { tenant: "demo", h: "2026-08-21T10:00:00Z", v: "0.85" },
+      { tenant: "demo", h: "2026-08-21T11:00:00Z", v: "0.90" }
+    ], [
+      { tenant: "demo", d: "2026-08-20", v: "120.5" },
+      { tenant: "demo", d: "2026-08-21", v: "30" }
+    ]);
+    const res = await callerWith(db).farms.summary() as Array<{
+      confidenceSeries: Array<{ t: string; v: number }>; spend7d: Array<{ d: string; v: number }>;
+    }>;
+    expect(res[0].confidenceSeries).toEqual([
+      { t: "2026-08-21T10:00:00Z", v: 0.85 }, { t: "2026-08-21T11:00:00Z", v: 0.9 }
+    ]);
+    expect(res[0].spend7d).toEqual([{ d: "2026-08-20", v: 120.5 }, { d: "2026-08-21", v: 30 }]);
+  });
+
+  it("sección caída degrada honesta: finca sin clima la devuelve con climate null", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: farmRows })   // farms
+      .mockResolvedValueOnce({ rows: [] })         // worstAlert
+      .mockResolvedValueOnce({ rows: [] })         // readings
+      .mockRejectedValueOnce(new Error("boom"));   // climate falla
+    const res = await callerWith({ execute } as never).farms.summary() as Array<{ climate: unknown; readings: unknown }>;
+    expect(res[0].climate).toBeNull();
+    expect(res[0].readings).toEqual({ ec: null, ph: null, level: null });
+  });
+});
+
+describe("overview.activity — feed unificado", () => {
+  it("mapea filas del UNION a items tipados y parsea meta string", async () => {
+    const db = mockDb([
+      { time: "2026-08-21T15:00:00Z", tenant: "demo", kind: "alert", ref: "ec_baja", severity: "critical", module: "mod-1", device: "ec_01", meta: '{"value":1.2}' },
+      { time: "2026-08-21T14:00:00Z", tenant: "ica", kind: "movement", ref: "nutrientes", severity: "gasto", module: null, device: null, meta: { amount: "55.00", currency: "USD", voided: false } },
+      { time: "2026-08-21T13:00:00Z", tenant: "demo", kind: "action", ref: "dose_nutrient", severity: "executed", module: "mod-1", device: "doser_a", meta: { requested_by: "experto-lechuga" } }
+    ]);
+    const res = await callerWith(db).overview.activity({ limit: 40 });
+    expect(res).toHaveLength(3);
+    expect(res[0]).toMatchObject({ kind: "alert", ref: "ec_baja", severity: "critical", meta: { value: 1.2 } });
+    expect(res[1]).toMatchObject({ kind: "movement", tenant: "ica", meta: { amount: "55.00", currency: "USD" } });
+    expect(res[2]).toMatchObject({ kind: "action", module: "mod-1", device: "doser_a" });
+  });
+
+  it("DB caída devuelve feed vacío honesto", async () => {
+    const db = { execute: vi.fn().mockRejectedValue(new Error("db down")) } as unknown as never;
+    expect(await callerWith(db).overview.activity({})).toEqual([]);
+  });
+});
