@@ -32,7 +32,7 @@ describe("haModuleConfidenceDiscovery", () => {
     const { payload } = haModuleConfidenceDiscovery(TENANT, MOD);
     expect(payload.unit_of_measurement).toBe("%");
     expect(payload.icon).toBe("mdi:gauge");
-    expect(payload.name).toBe(`Módulo ${MOD} Confianza`);
+    expect(payload.name).toBe(`${MOD} Confianza`);
   });
 
   it("payload es JSON válido para HA MQTT sensor", () => {
@@ -73,7 +73,7 @@ describe("haModuleHealthDiscovery", () => {
   it("icono heart-pulse, nombre", () => {
     const { payload } = haModuleHealthDiscovery(TENANT, MOD);
     expect(payload.icon).toBe("mdi:heart-pulse");
-    expect(payload.name).toBe(`Módulo ${MOD} Salud`);
+    expect(payload.name).toBe(`${MOD} Salud`);
   });
 
   it("sin unidad (estado enumerado)", () => {
@@ -147,5 +147,44 @@ describe("buildDiscoveryConfigs incluye módulos", () => {
     const health = configs.find((c) => (c.payload.unique_id as string).endsWith("_health"));
     expect(confidence?.payload.value_template).toBe("{{ value_json.v }}");
     expect(health?.payload.value_template).toBe("{{ value_json.state }}");
+  });
+});
+
+describe("nombre de módulo y suggested_area (ADR-0022)", () => {
+  it("sin nombre: fallback honesto al id técnico en device y área", () => {
+    const configs = buildDiscoveryConfigs(TENANT, MOD);
+    for (const { payload } of configs) {
+      const device = payload.device as { name: string; suggested_area?: string };
+      expect(device.suggested_area).toBe(MOD);
+    }
+  });
+
+  it("con nombre: device name y suggested_area usan el nombre humano", () => {
+    const configs = buildDiscoveryConfigs(TENANT, MOD, "Mesa Norte");
+    for (const { payload } of configs) {
+      const device = payload.device as { name: string; suggested_area?: string };
+      expect(device.name).toContain("Mesa Norte");
+      expect(device.suggested_area).toBe("Mesa Norte");
+    }
+  });
+
+  it("con nombre: entidades de nodo se nombran con el display", () => {
+    const configs = buildDiscoveryConfigs(TENANT, MOD, "Mesa Norte");
+    const ec = configs.find((c) => (c.payload.unique_id as string) === `${MOD}-ec-01-ec`);
+    expect(ec?.payload.name).toBe("Mesa Norte EC");
+  });
+
+  it("con nombre: sensores de módulo (confianza/salud) usan el display", () => {
+    const configs = buildDiscoveryConfigs(TENANT, MOD, "Mesa Norte");
+    const confidence = configs.find((c) => (c.payload.unique_id as string).endsWith("_confidence"));
+    const health = configs.find((c) => (c.payload.unique_id as string).endsWith("_health"));
+    expect(confidence?.payload.name).toBe("Mesa Norte Confianza");
+    expect(health?.payload.name).toBe("Mesa Norte Salud");
+  });
+
+  it("unique_id NO cambia con el nombre (identidad estable en HA)", () => {
+    const withName = buildDiscoveryConfigs(TENANT, MOD, "Mesa Norte").map((c) => c.payload.unique_id);
+    const withoutName = buildDiscoveryConfigs(TENANT, MOD).map((c) => c.payload.unique_id);
+    expect(withName).toEqual(withoutName);
   });
 });

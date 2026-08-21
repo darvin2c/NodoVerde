@@ -46,15 +46,15 @@ export async function queryReadOnly(text: string, params?: unknown[]): Promise<p
 // Helpers read-only de dominio (todas SELECT)
 // ---------------------------------------------------------------------------
 
-export async function listModulesDb(tenant?: string): Promise<{ tenant: string; id: string; crop: string }[]> {
+export async function listModulesDb(tenant?: string): Promise<{ tenant: string; id: string; name: string | null; crop: string; retired_at: Date | null }[]> {
   if (tenant) {
     const r = await queryReadOnly(
-      `SELECT tenant, id, crop FROM modules WHERE tenant = $1 ORDER BY tenant, id`,
+      `SELECT tenant, id, name, crop, retired_at FROM modules WHERE tenant = $1 ORDER BY tenant, id`,
       [tenant],
     );
     return r.rows;
   }
-  const r = await queryReadOnly(`SELECT tenant, id, crop FROM modules ORDER BY tenant, id`);
+  const r = await queryReadOnly(`SELECT tenant, id, name, crop, retired_at FROM modules ORDER BY tenant, id`);
   return r.rows;
 }
 

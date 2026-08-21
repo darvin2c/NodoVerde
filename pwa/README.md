@@ -1,66 +1,52 @@
-# terraOS PWA — Portada read-only
+# terraOS PWA — Panel de control
 
-PWA instalable (Vite + React + TanStack Router + tRPC + drizzle-orm) que resume el estado del sistema en **6 secciones** (ADR-0014). **Cero actuación**: no hay botones que muevan actuadores; solo lectura.
+Dashboard instalable (Vite + React + TanStack Router + tRPC + drizzle-orm + shadcn/Base UI + Tailwind v4) — la portada pro del sistema (ADR-0014, Fase 6). Dark/light, sidebar colapsable, header con breadcrumb + ⌘K + campana de alertas.
 
-## Qué muestra
+## Rutas
 
-| Sección | Fuente | Enlace |
+| Ruta | Qué muestra | Fuente |
 |---|---|---|
-| **SISTEMA** | `system.status` (MQTT conectado, DB ok, último `telemetry`, health de módulos) | HA :8124 / Grafana :3001 |
-| **MÓDULOS** | `modules.list` (DB) + suscripciones `modules.confidence` / `modules.health` (`terra/+/+/confidence`, `terra/+/+/health`) | HA :8124 |
-| **CAMPO** | `field.latest` — última lectura EC/pH/temp/tanque por módulo (`telemetry`) | Grafana :3001 |
-| **FINANZAS** | `finance.monthSummary` — SUM en SQL sobre `movements` del mes; vacío honesto si no hay movimientos | — |
-| **PENDIENTES** | `pending.alerts` — `alerts` warn/critical + placeholder *aprobaciones: Fase 3* | — |
-| **CÁMARAS** | `cameras.lastPhoto` — último `photo` por módulo en `telemetry`; tarjeta *sin cámara Fase 0* si no hay datos | MinIO :9000 |
+| `/` Overview | KPIs: módulos OK, alertas abiertas 24h, aprobaciones pendientes, gasto del día, confianza media, campaña | `overview.kpis` |
+| `/modulos` | Tarjetas por módulo: salud, confianza, EC/pH/tanque | `modules.list` + `field.latest` + SSE |
+| `/modulos/:id` | Lecturas vs rangos del perfil (fuera de rango marcado), sparklines 24h, confianza por fuente, alertas del módulo | `modules.detail` + `field.series` |
+| `/alertas` | Centro de alertas: severidad, abierta/resuelta, drawer con **qué está pasando + cómo solucionar** (mapa de remediación en código, `src/lib/remediation.ts`) | `alerts.list` |
+| `/finanzas` | Mes: ingresos/gastos/balance, gasto por categoría, movimientos (anulados tachados — ADR-0011) | `finance.*` |
+| `/aprobaciones` | Acciones del portero (aprobar/rechazar, ADR-0020) + órdenes de trabajo manuales | `pending.*` |
+| `/camaras` | Última foto por módulo o placeholder honesto | `cameras.lastPhoto` |
+| `/fincas` | Gestión de fincas: crear (slug inmutable + lat/lon + moneda), editar, archivar (nada se borra) | `tenants.*` → MCP dominio (ADR-0023) |
+| `/sistema` | Sonda de servicios (broker, DB, portero, MCPs, sim) + salud de módulos + links | `system.services` |
 
-Cada tarjeta enlaza a la herramienta dueña (HA para operar, Grafana para analizar, MinIO para fotos).
+## Finca activa (ADR-0023)
+
+Selector en el header: **una finca** filtra todas las páginas; **"Todas las fincas"** agrega con tarjetas/tablas por finca y etiqueta de finca por fila. Regla de oro: jamás sumar monedas distintas — el gasto global multi-moneda es `—` honesto y el desglose va por finca. La selección persiste en `localStorage` (sin auth); si la finca se archiva, vuelve a "Todas" sola. Montos con `formatMoney(amount, currency)` — la moneda es de la finca, no fija.
+
+## Escrituras (las únicas)
+
+- `pending.decide` / `pending.completeWorkOrder` → portero HTTP con `POLICY_ADMIN_TOKEN` (ADR-0020, cero LLM).
+- `alerts.resolve` → MCP dominio `resolve_alert` (ADR-0021, resolución gobernada en `alert_resolutions`).
+- `modules.create/update/retire/claim` → MCP dominio (ADR-0022, provisionamiento gobernado).
+- `tenants.create/update/archive` → MCP dominio (ADR-0023; validación de slug/moneda en la frontera tRPC).
+
+Todo lo demás es lectura. Nunca publica `cmd/` ni `request/`.
 
 ## Stack
 
-- **Frontend**: Vite + React 18 + TanStack Router + TanStack Query + tRPC client (`httpBatchLink` + `httpSubscriptionLink` SSE)
-- **Servidor**: Node + tRPC server (`superjson`) + drizzle-orm + `mqtt` (solo en `server/`)
-- **PWA**: `vite-plugin-pwa` — manifest `terraOS`, theme oscuro `#0f172a`, iconos `pwa-192/512` generados
+- **Frontend**: Vite + React 18 + TanStack Router (rutas code-based) + TanStack Query (polling 5–15s) + tRPC client (`httpBatchLink` + SSE para subscriptions) + shadcn/ui sobre **Base UI** (`@base-ui/react`) + Tailwind v4 (CSS-first, tokens en `src/index.css`).
+- **Server** (`server/`): tRPC standalone + drizzle/pg sobre TimescaleDB + bus MQTT interno (SSE fan-out) + fetch al portero + cliente MCP al mcp-domain.
+- Componentes UI: instalados vía `pnpm dlx shadcn@latest add <componente>` (preset base-nova). **No escribir primitivos a mano.**
 
-## Cómo correr
+## Dev
 
 ```bash
-cp ../.env.example ../.env   # DATABASE_URL, MQTT_URL
 pnpm install
-pnpm dev                     # concurrently: Vite :5173 + tRPC server :7780
-# o por separado:
-# VITE_API_URL=http://localhost:7780/trpc pnpm vite --port 5173
-# PWA_SERVER_PORT=7780 DATABASE_URL=postgres://terra:changeme@localhost:5432/terra MQTT_URL=mqtt://localhost:1883 pnpm tsx server/index.ts
+pnpm dev        # vite :5173 (proxy /trpc) + server :7780
+pnpm test       # vitest: procedures + policy + remediación + dashboard
+pnpm build      # tsc server → dist-server + vite → dist (PWA con SW)
 ```
 
-Variables:
+## Tests
 
-- `DATABASE_URL` — default `postgres://terra:changeme@localhost:5432/terra`
-- `MQTT_URL` — default `mqtt://localhost:1883`
-- `PWA_SERVER_PORT` — default `7780`
-- `VITE_API_URL` — default `/trpc` (usa proxy de Vite en dev)
-
-## Build
-
-```bash
-pnpm build   # tsc (server) + vite build (client)
-pnpm start   # node dist/server/index.js  (sirve tRPC; el front es estático en dist/)
-pnpm test    # vitest — procedures con DB mockeada
-```
-
-## Read-only — garantías
-
-- Ningún componente importa `mqtt` (solo `server/mqtt.ts`).
-- No existe publish a `cmd` ni `request/` en el código PWA — `grep -r "request\|cmd"` solo toca comentarios/docs.
-- Finanzas: `SUM` en SQL, no en el render.
-- Ausencia de dato ≠ cero: secciones muestran *sin datos / sin movimientos / sin cámara*.
-
-## Estructura
-
-```
-pwa/
-  vite.config.ts  tsconfig*.json  index.html
-  src/  main.tsx  App.tsx  trpc.ts  components/ui/  lib/
-  server/  index.ts  trpc.ts  db.ts  mqtt.ts
-  public/  pwa-192x192.png  pwa-512x512.png  favicon.svg
-  test/  procedures.test.ts
-```
+- `test/procedures.test.ts` — procedures base (finanzas, campo, shaping confianza).
+- `test/policy.test.ts` — cliente del portero (aprobaciones/órdenes).
+- `test/dashboard.test.ts` — procedures Fase 6 (alerts.list con estado abierto, overview.kpis, modules.detail, system.services).
+- `test/remediation.test.ts` — el mapa de remediación cubre exactamente los tipos de alerta que emite el sistema; añadir un tipo nuevo de alerta exige su ficha.

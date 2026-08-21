@@ -1,7 +1,7 @@
 asyncapi: "3.0.0"
 info:
   title: terraOS Bus Contract
-  version: 0.7.0
+  version: 0.8.0
   description: |
     Contrato AUTORITATIVO del bus MQTT de terraOS (ADR-0003, ADR-0015, ADR-0010).
     Toda comunicación sim/edge/router/cerebro pasa por aquí.
@@ -340,6 +340,21 @@ channels:
       moduleAlert:
         payload: { $ref: "#/components/schemas/Alert" }
 
+  moduleMeta:
+    address: terra/{tenant}/{module}/meta
+    description: |
+      Evento de dominio del módulo (plano plataforma, 4 seg). NO retained, qos1.
+      Lo publica ÚNICAMENTE services/mcp-domain tras una escritura gobernada de módulo (ADR-0022).
+      event ∈ module_created | module_updated | module_retired | device_claimed.
+      Consume: router (refresca/borra discovery HA sin reinicio; en module_retired deja de
+      aceptar telemetría del módulo). No se historifica.
+    parameters:
+      tenant: { description: "Slug de finca" }
+      module: { description: "ID de módulo" }
+    messages:
+      moduleMeta:
+        payload: { $ref: "#/components/schemas/ModuleMeta" }
+
 components:
   schemas:
     Reading:
@@ -388,6 +403,17 @@ components:
             type: string
             enum: [ok, silence, frozen, impossible, offline]
           description: estado por deviceId
+    ModuleMeta:
+      type: object
+      required: [event, tenant, module, ts]
+      properties:
+        event:
+          type: string
+          enum: [module_created, module_updated, module_retired, device_claimed]
+          description: "Escritura gobernada de módulo (ADR-0022). module_updated cubre rename y cambio de cultivo."
+        tenant: { type: string }
+        module: { type: string }
+        ts: { type: string, format: date-time }
     Alert:
       type: object
       required: [name, ts, severity]

@@ -241,6 +241,7 @@ services:
     environment:
       MCP_DOMAIN_PORT: "7760"
       DATABASE_URL: postgres://${POSTGRES_USER:-terra}:${POSTGRES_PASSWORD:-changeme}@timescale:5432/${POSTGRES_DB:-terra}
+      MQTT_URL: mqtt://mosquitto:1883
       # Fase 4 (ADR-0021): memory_hash de campañas = sha256 del MEMORY.md del experto
       WORKSPACES_PATH: /workspaces
     volumes:
@@ -369,6 +370,7 @@ services:
       MQTT_URL: mqtt://mosquitto:1883
       POLICY_URL: http://policy:7762
       POLICY_ADMIN_TOKEN: ${POLICY_ADMIN_TOKEN:-dev-admin-token}
+      MCP_DOMAIN_URL: http://mcp-domain:7760/mcp
     depends_on:
       mosquitto:
         condition: service_healthy

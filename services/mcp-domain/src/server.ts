@@ -25,7 +25,24 @@ import {
   insertCampaignDb,
   closeCampaignDb,
   insertResolutionDb,
+  isValidHwId,
+  getModuleDb,
+  getOpenCampaignWithModuleDb,
+  insertModuleDb,
+  updateModuleDb,
+  retireModuleDb,
+  claimDeviceDb,
+  isValidTenantId,
+  isValidCurrency,
+  isValidLatLon,
+  listTenantsDb,
+  getTenantDb,
+  insertTenantDb,
+  updateTenantDb,
+  archiveTenantDb,
 } from "./write.js";
+import { publishModuleMeta } from "./bus.js";
+import tzLookup from "tz-lookup";
 
 function summaryText(obj: unknown, maxLen = 4000): string {
   const s = JSON.stringify(obj, null, 2);
@@ -97,7 +114,7 @@ export function createMcpServer(): McpServer {
         tenant: farm.tenant,
         farm_name: farm.name,
         location: { name: farm.location_name, lat: farm.lat, lon: farm.lon, tz: farm.tz },
-        modules: modules.map((m) => ({ id: m.id, crop: m.crop })),
+        modules: modules.map((m) => ({ id: m.id, name: m.name, crop: m.crop, retired: m.retired_at !== null })),
         missing,
       };
       const text = `Finca ${farm.name} (${farm.tenant})` + (missing.length ? ` — campos ausentes: ${missing.join(", ")}` : "");
@@ -274,7 +291,7 @@ export function createMcpServer(): McpServer {
         farm: farm
           ? { tenant: farm.tenant, name: farm.name, location_name: farm.location_name, lat: farm.lat, lon: farm.lon, tz: farm.tz }
           : null,
-        modules: modules.map((m) => ({ tenant: m.tenant, id: m.id, crop: m.crop })),
+        modules: modules.map((m) => ({ tenant: m.tenant, id: m.id, name: m.name, crop: m.crop, retired: m.retired_at !== null })),
         profiles,
         telemetry: telemetry.map((r) => ({
           tenant: r.tenant,
@@ -335,7 +352,8 @@ export function createMcpServer(): McpServer {
         };
       }
       const mods = await listModulesDb(tenant);
-      const filtered = mods.filter((m) => m.crop === crop).map((m) => m.id);
+      // Módulos retirados no entran en campañas nuevas (ADR-0022)
+      const filtered = mods.filter((m) => m.crop === crop && m.retired_at === null).map((m) => m.id);
       const profileHash = computeProfileHash(profile as Record<string, unknown>);
       const memoryHash = await computeMemoryHash(crop);
       try {
@@ -476,6 +494,366 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text: `${text}\n${summaryText(rows)}` }],
         structuredContent: { tenant, only_open: !!only_open, alerts: rows } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — create_module ----------------------------------------------------------
+  server.registerTool(
+    "create_module",
+    {
+      title: "Crear módulo",
+      description:
+        "Crea un módulo (unidad lógica de cultivo, ADR-0022) con id técnico autogenerado mod-N y nombre humano libre. Valida que el cultivo existe en crop_profiles. Nace sin fierro: vincular luego con claim_device.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        name: z.string().min(1).describe("Nombre humano del módulo (ej: 'Mesa Norte')"),
+        crop: z.string().describe("Cultivo (crop_profiles.name)"),
+      },
+    },
+    async ({ tenant, name, crop }) => {
+      const profile = await getCropProfileDb(crop);
+      if (!profile) {
+        return {
+          content: [{ type: "text", text: `crop no existe: ${crop}` }],
+          structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await insertModuleDb(tenant, name, crop);
+      await publishModuleMeta(tenant, row.id, "module_created");
+      return {
+        content: [{ type: "text", text: `Módulo creado ${row.id} "${name}" tenant=${tenant} crop=${crop}\n${summaryText(row)}` }],
+        structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — update_module ----------------------------------------------------------
+  server.registerTool(
+    "update_module",
+    {
+      title: "Actualizar módulo",
+      description:
+        "Renombra un módulo y/o cambia su cultivo. Reglas: módulo retirado no se edita; cambio de cultivo bloqueado si el módulo está en la campaña abierta (congelamiento ADR-0021). Al renombrar, el router refresca el nombre/área en Home Assistant.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        module: z.string().describe("Id técnico del módulo (mod-N)"),
+        name: z.string().min(1).optional().describe("Nuevo nombre humano"),
+        crop: z.string().optional().describe("Nuevo cultivo (crop_profiles.name)"),
+      },
+    },
+    async ({ tenant, module: moduleId, name, crop }) => {
+      const mod = await getModuleDb(tenant, moduleId);
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+          structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (mod.retired_at) {
+        return {
+          content: [{ type: "text", text: `módulo retirado (${mod.retired_at.toISOString()}) — no se edita` }],
+          structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (name === undefined && crop === undefined) {
+        return {
+          content: [{ type: "text", text: "nada que actualizar: pasa name y/o crop" }],
+          structuredContent: { error: "no_fields", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (crop !== undefined) {
+        const profile = await getCropProfileDb(crop);
+        if (!profile) {
+          return {
+            content: [{ type: "text", text: `crop no existe: ${crop}` }],
+            structuredContent: { error: "crop_not_found", crop } as unknown as Record<string, unknown>,
+          };
+        }
+        if (crop !== mod.crop) {
+          const campaign = await getOpenCampaignWithModuleDb(tenant, moduleId);
+          if (campaign) {
+            const text = `cambio de cultivo bloqueado: ${moduleId} está en la campaña abierta ${campaign.id} — cierra la campaña primero`;
+            return {
+              content: [{ type: "text", text }],
+              structuredContent: { error: "module_in_open_campaign", tenant, module: moduleId, campaign_id: campaign.id } as unknown as Record<string, unknown>,
+            };
+          }
+        }
+      }
+      const row = await updateModuleDb(tenant, moduleId, { name, crop });
+      await publishModuleMeta(tenant, moduleId, "module_updated");
+      return {
+        content: [{ type: "text", text: `Módulo ${moduleId} actualizado\n${summaryText(row)}` }],
+        structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — retire_module ----------------------------------------------------------
+  server.registerTool(
+    "retire_module",
+    {
+      title: "Retirar módulo",
+      description:
+        "Retira un módulo (retired_at). NADA se borra (ADR-0011 aplicado a dominio): conserva telemetría, alertas e historia financiera. Deja de aceptar telemetría/claiming y sale de HA. Bloqueado si está en la campaña abierta (ADR-0021).",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        module: z.string().describe("Id técnico del módulo (mod-N)"),
+      },
+    },
+    async ({ tenant, module: moduleId }) => {
+      const mod = await getModuleDb(tenant, moduleId);
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+          structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (mod.retired_at) {
+        return {
+          content: [{ type: "text", text: `módulo ya retirado (${mod.retired_at.toISOString()})` }],
+          structuredContent: { error: "module_already_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      const campaign = await getOpenCampaignWithModuleDb(tenant, moduleId);
+      if (campaign) {
+        const text = `retiro bloqueado: ${moduleId} está en la campaña abierta ${campaign.id} — cierra la campaña primero`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { error: "module_in_open_campaign", tenant, module: moduleId, campaign_id: campaign.id } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await retireModuleDb(tenant, moduleId);
+      await publishModuleMeta(tenant, moduleId, "module_retired");
+      return {
+        content: [{ type: "text", text: `Módulo ${moduleId} retirado\n${summaryText(row)}` }],
+        structuredContent: { module: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — claim_device -----------------------------------------------------------
+  server.registerTool(
+    "claim_device",
+    {
+      title: "Vincular fierro a módulo",
+      description:
+        "Claiming (ADR-0015/0022): asocia un hw_id (12 hex minúsculas, MAC sin dos puntos) a un módulo activo. Desde ahí el router traduce su telemetría al plano interno y publica su discovery en HA. Un hw_id solo puede claimearse una vez; un módulo acepta UN fierro activo.",
+      inputSchema: {
+        tenant: z.string().describe("Tenant"),
+        module: z.string().describe("Id técnico del módulo (mod-N)"),
+        hw_id: z.string().describe("Id de fábrica del ESP32: 12 hex minúsculas"),
+        claimed_by: z.string().optional().describe("Quién claimea (default pwa)"),
+      },
+    },
+    async ({ tenant, module: moduleId, hw_id, claimed_by }) => {
+      if (!isValidHwId(hw_id)) {
+        return {
+          content: [{ type: "text", text: `hw_id inválido: "${hw_id}" — se esperan 12 hex minúsculas (ej: 020000000005)` }],
+          structuredContent: { error: "invalid_hw_id", hw_id } as unknown as Record<string, unknown>,
+        };
+      }
+      const mod = await getModuleDb(tenant, moduleId);
+      if (!mod) {
+        return {
+          content: [{ type: "text", text: `módulo no existe: ${tenant}/${moduleId}` }],
+          structuredContent: { error: "module_not_found", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      if (mod.retired_at) {
+        return {
+          content: [{ type: "text", text: `módulo retirado — no acepta claiming` }],
+          structuredContent: { error: "module_retired", tenant, module: moduleId } as unknown as Record<string, unknown>,
+        };
+      }
+      let claimed: boolean;
+      try {
+        claimed = await claimDeviceDb(hw_id, tenant, moduleId, claimed_by ?? "pwa");
+      } catch (err) {
+        // device_identities_one_hardware_per_module: el módulo ya tiene un fierro activo
+        if ((err as { code?: string }).code === "23505") {
+          return {
+            content: [{ type: "text", text: `módulo ${moduleId} ya tiene un fierro vinculado — un módulo acepta UN hardware activo` }],
+            structuredContent: { error: "module_already_has_hardware", tenant, module: moduleId } as unknown as Record<string, unknown>,
+          };
+        }
+        throw err;
+      }
+      if (!claimed) {
+        return {
+          content: [{ type: "text", text: `hw_id ${hw_id} ya está claimeado — libera el anterior antes de reclaimear` }],
+          structuredContent: { error: "hw_already_claimed", hw_id } as unknown as Record<string, unknown>,
+        };
+      }
+      await publishModuleMeta(tenant, moduleId, "device_claimed");
+      const text = `Fierro ${hw_id} vinculado a ${tenant}/${moduleId}`;
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { hw_id, tenant, module: moduleId } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — list_tenants -----------------------------------------------------------
+  server.registerTool(
+    "list_tenants",
+    {
+      title: "Listar fincas",
+      description: "Lista las fincas (tenants) registradas. Por defecto solo activas; include_archived=true incluye las archivadas.",
+      inputSchema: {
+        include_archived: z.boolean().optional().describe("Incluir fincas archivadas (default false)"),
+      },
+    },
+    async ({ include_archived }) => {
+      const rows = await listTenantsDb(include_archived ?? false);
+      return {
+        content: [{ type: "text", text: `Fincas: ${rows.length}\n${summaryText(rows)}` }],
+        structuredContent: { tenants: rows } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — create_tenant ----------------------------------------------------------
+  server.registerTool(
+    "create_tenant",
+    {
+      title: "Crear finca",
+      description:
+        "Crea una finca (tenant, ADR-0023). El id es un slug elegido por el usuario (^[a-z0-9][a-z0-9-]*$), INMUTABLE: queda gravado en topics MQTT e historia. lat/lon son obligatorias (clima/ET0); la zona horaria se deriva offline de las coordenadas. La finca nace vacía: sin módulos ni telemetría.",
+      inputSchema: {
+        id: z.string().describe("Slug inmutable (ej: 'finca-norte') — visible en topics MQTT"),
+        name: z.string().min(1).describe("Nombre humano (ej: 'Finca Norte')"),
+        lat: z.number().describe("Latitud (obligatoria — clima/ET0)"),
+        lon: z.number().describe("Longitud (obligatoria — clima/ET0)"),
+        location_name: z.string().optional().describe("Zona humana (ej: 'Lambayeque, Perú')"),
+        currency: z.string().optional().describe("Moneda ISO 4217 (default PEN)"),
+      },
+    },
+    async ({ id, name, lat, lon, location_name, currency }) => {
+      if (!isValidTenantId(id)) {
+        return {
+          content: [{ type: "text", text: `id inválido: "${id}" — slug minúscula ^[a-z0-9][a-z0-9-]*$ (2-48 chars), inmutable` }],
+          structuredContent: { error: "invalid_tenant_id", id } as unknown as Record<string, unknown>,
+        };
+      }
+      if (!isValidLatLon(lat, lon)) {
+        return {
+          content: [{ type: "text", text: `coordenadas inválidas: lat=${lat}, lon=${lon}` }],
+          structuredContent: { error: "invalid_coordinates", lat, lon } as unknown as Record<string, unknown>,
+        };
+      }
+      const cur = currency ?? "PEN";
+      if (!isValidCurrency(cur)) {
+        return {
+          content: [{ type: "text", text: `moneda inválida: "${cur}" — ISO 4217, 3 letras mayúsculas (ej: PEN, USD)` }],
+          structuredContent: { error: "invalid_currency", currency: cur } as unknown as Record<string, unknown>,
+        };
+      }
+      let tz: string | null = null;
+      try {
+        tz = tzLookup(lat, lon);
+      } catch {
+        // coordenadas en océano o fuera de cobertura — honesto: tz null, el reporte usa UTC
+        tz = null;
+      }
+      const row = await insertTenantDb({ id, name, location_name: location_name ?? null, lat, lon, tz, currency: cur });
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `ya existe una finca con id "${id}" — los ids no se reutilizan` }],
+          structuredContent: { error: "tenant_exists", id } as unknown as Record<string, unknown>,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Finca creada: ${row.id} "${row.name}" tz=${row.tz ?? "desconocida"} currency=${row.currency}\n${summaryText(row)}` }],
+        structuredContent: { tenant: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — update_tenant ----------------------------------------------------------
+  server.registerTool(
+    "update_tenant",
+    {
+      title: "Actualizar finca",
+      description:
+        "Actualiza campos mutables de una finca (name, location_name, lat/lon, currency). El id jamás cambia. Si cambian las coordenadas y no se pasa tz explícita, la zona horaria se re-deriva de las nuevas coordenadas.",
+      inputSchema: {
+        id: z.string().describe("Id de la finca (inmutable)"),
+        name: z.string().min(1).optional(),
+        location_name: z.string().nullable().optional(),
+        lat: z.number().optional(),
+        lon: z.number().optional(),
+        currency: z.string().optional().describe("Moneda ISO 4217"),
+      },
+    },
+    async ({ id, name, location_name, lat, lon, currency }) => {
+      const current = await getTenantDb(id);
+      if (!current) {
+        return {
+          content: [{ type: "text", text: `finca no existe: ${id}` }],
+          structuredContent: { error: "tenant_not_found", id } as unknown as Record<string, unknown>,
+        };
+      }
+      if (currency !== undefined && !isValidCurrency(currency)) {
+        return {
+          content: [{ type: "text", text: `moneda inválida: "${currency}" — ISO 4217, 3 letras mayúsculas` }],
+          structuredContent: { error: "invalid_currency", currency } as unknown as Record<string, unknown>,
+        };
+      }
+      const fields: { name?: string; location_name?: string | null; lat?: number; lon?: number; tz?: string | null; currency?: string } = {};
+      if (name !== undefined) fields.name = name;
+      if (location_name !== undefined) fields.location_name = location_name;
+      if (currency !== undefined) fields.currency = currency;
+      const coordsChanged = lat !== undefined || lon !== undefined;
+      if (coordsChanged) {
+        const newLat = lat ?? current.lat;
+        const newLon = lon ?? current.lon;
+        if (newLat === null || newLon === null || !isValidLatLon(newLat, newLon)) {
+          return {
+            content: [{ type: "text", text: `coordenadas inválidas: lat=${newLat}, lon=${newLon}` }],
+            structuredContent: { error: "invalid_coordinates", lat: newLat, lon: newLon } as unknown as Record<string, unknown>,
+          };
+        }
+        fields.lat = newLat;
+        fields.lon = newLon;
+        try {
+          fields.tz = tzLookup(newLat, newLon);
+        } catch {
+          fields.tz = null;
+        }
+      }
+      const row = await updateTenantDb(id, fields);
+      return {
+        content: [{ type: "text", text: `Finca actualizada: ${row!.id}\n${summaryText(row)}` }],
+        structuredContent: { tenant: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — archive_tenant ---------------------------------------------------------
+  server.registerTool(
+    "archive_tenant",
+    {
+      title: "Archivar finca",
+      description:
+        "Archiva o desarchiva una finca. Archivada sale del selector de la PWA pero su historia completa queda conservada (nada se borra, ADR-0011). Sus módulos/telemetría NO se tocan.",
+      inputSchema: {
+        id: z.string().describe("Id de la finca"),
+        archived: z.boolean().describe("true = archivar, false = desarchivar"),
+      },
+    },
+    async ({ id, archived }) => {
+      const row = await archiveTenantDb(id, archived);
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `finca no existe: ${id}` }],
+          structuredContent: { error: "tenant_not_found", id } as unknown as Record<string, unknown>,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `${archived ? "Finca archivada" : "Finca desarchivada"}: ${row.id} "${row.name}"` }],
+        structuredContent: { tenant: row } as unknown as Record<string, unknown>,
       };
     },
   );

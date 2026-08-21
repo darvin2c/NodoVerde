@@ -1,35 +1,26 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createRouter, createRootRoute, createRoute, RouterProvider, Outlet } from "@tanstack/react-router";
-import App from "./App.tsx";
+import { RouterProvider } from "@tanstack/react-router";
+import { ThemeProvider } from "@/components/theme-provider.tsx";
+import { TenantProvider } from "@/components/tenant-provider.tsx";
+import { router } from "./router.tsx";
 import "./index.css";
 
-const queryClient = new QueryClient();
-
-const rootRoute = createRootRoute({
-  component: () => (
-    <QueryClientProvider client={queryClient}>
-      <Outlet />
-    </QueryClientProvider>
-  )
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { staleTime: 5000, retry: 1 }
+  }
 });
-
-const indexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/",
-  component: App
-});
-
-const routeTree = rootRoute.addChildren([indexRoute]);
-const router = createRouter({ routeTree });
-
-declare module "@tanstack/react-router" {
-  interface Register { router: typeof router; }
-}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <TenantProvider>
+          <RouterProvider router={router} />
+        </TenantProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   </React.StrictMode>
 );

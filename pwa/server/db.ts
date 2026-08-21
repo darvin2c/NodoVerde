@@ -1,5 +1,5 @@
 import pg from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { pgTable, text, doublePrecision, timestamp, uuid, numeric, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -9,6 +9,12 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://terra:changeme@loca
 export const tenants = pgTable("tenants", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  locationName: text("location_name"),
+  lat: doublePrecision("lat"),
+  lon: doublePrecision("lon"),
+  tz: text("tz"),
+  currency: text("currency").notNull().default("PEN"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 
@@ -73,18 +79,18 @@ export const confidenceHistory = pgTable("confidence_history", {
   sources: jsonb("sources")
 });
 
+/** Conexión drizzle a TimescaleDB — tipo nombrado del boundary DB de la PWA */
+export type TerraDb = NodePgDatabase;
+
 let _pool: pg.Pool | null = null;
-let _db: ReturnType<typeof drizzle> | null = null;
+let _db: TerraDb | null = null;
 
 export function getPool(): pg.Pool {
   if (!_pool) _pool = new pg.Pool({ connectionString: DATABASE_URL });
   return _pool;
 }
 
-export function getDb() {
+export function getDb(): TerraDb {
   if (!_db) _db = drizzle(getPool());
   return _db;
 }
-
-// Helpers para tests: permiten inyectar db mock
-export type DbType = ReturnType<typeof getDb>;

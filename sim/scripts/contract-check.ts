@@ -1,13 +1,14 @@
 // Contract test nivel 2: captura mensajes vivos del broker y los valida
 // contra los schemas de contract/asyncapi.yaml. Uso: pnpm contract [segundos]
-// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.7.0):
+// Valida tres planos MQTT (ADR-0015 + ADR-0010 Fase 1 + Fase 3 v0.8.0):
 //   - dispositivo (4-5 seg) — terra/{hw_id}/{device}/{metric}/reading|event|status|confidence, request, cmd (Fase 3)
 //   - interno (5-6 seg)     — terra/{tenant}/{module}/{device}/{metric}/reading|event|status|confidence, request/cmd
-//   - plataforma (4 seg)    — terra/{tenant}/{module}/confidence|health|alert (servicios de dominio DIRECTO, sin hw_id)
+//   - plataforma (4 seg)    — terra/{tenant}/{module}/confidence|health|alert|meta (servicios de dominio DIRECTO, sin hw_id)
 import mqtt from "mqtt";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import Ajv, { type ValidateFunction } from "ajv";
+import addFormats from "ajv-formats";
 
 const seconds = parseInt(process.argv[2] ?? "40", 10);
 const brokerUrl = process.env.MQTT_URL ?? "mqtt://localhost:1883";
@@ -15,6 +16,7 @@ const brokerUrl = process.env.MQTT_URL ?? "mqtt://localhost:1883";
 const doc = parse(readFileSync(new URL("../../contract/asyncapi.yaml", import.meta.url), "utf8"));
 const schemas = doc.components.schemas;
 const ajv = new Ajv({ allErrors: true });
+addFormats(ajv);
 const validators: Record<string, ValidateFunction> = {};
 for (const [name, schema] of Object.entries<any>(schemas)) {
   if (name === "deviceMetrics") continue;
@@ -35,6 +37,7 @@ function schemaFor(topic: string): string | null {
     if (kind === "confidence") return "Confidence";
     if (kind === "health") return "Health";
     if (kind === "alert") return "Alert";
+    if (kind === "meta") return "ModuleMeta"; // ADR-0022 eventos de dominio de módulo
     return null;
   }
   // plano dispositivo — 5 segmentos (o interno cmd 5-seg)
@@ -143,5 +146,5 @@ setTimeout(() => {
     for (const e of errors.slice(0, 20)) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log("[contract] OK — todo mensaje observado cumple AsyncAPI v0.7.0");
+  console.log(`[contract] OK — todo mensaje observado cumple AsyncAPI v${doc.info.version}`);
 }, seconds * 1000);

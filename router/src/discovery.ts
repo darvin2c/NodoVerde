@@ -63,11 +63,14 @@ export function haSensorDiscovery(opts: {
   name: string;
   unit?: string;
   deviceClass?: string;
+  moduleName?: string | null;
 }): { topic: string; payload: Record<string, unknown> } {
   const deviceId = `${opts.module}-${opts.device}`;
   const uniqueId = `${opts.module}-${opts.device}-${opts.metric}`;
   const stateTopic = buildInternalReadingTopic(opts.tenant, opts.module, opts.device, opts.metric);
   const availabilityTopic = buildInternalStatusTopic(opts.tenant, opts.module, opts.device);
+  // Nombre humano del módulo (ADR-0022); fallback honesto al id técnico
+  const display = opts.moduleName ?? opts.module;
 
   const payload: Record<string, unknown> = {
     name: opts.name,
@@ -80,8 +83,10 @@ export function haSensorDiscovery(opts: {
     availability_template: "{{ value_json.state }}",
     device: {
       identifiers: [deviceId],
-      name: `${opts.module} ${opts.device}`,
+      name: `${display} ${opts.device}`,
       manufacturer: "terraOS",
+      // HA crea el área automáticamente si no existe y agrupa el dispositivo
+      suggested_area: display,
     },
   };
 
@@ -99,12 +104,14 @@ export function haSwitchDiscovery(opts: {
   module: string;
   device: string;
   name: string;
+  moduleName?: string | null;
 }): { topic: string; payload: Record<string, unknown> } {
   const deviceId = `${opts.module}-${opts.device}`;
   const uniqueId = `${opts.module}-${opts.device}-switch`;
   const stateTopic = buildInternalReadingTopic(opts.tenant, opts.module, opts.device, "switch");
   const commandTopic = buildInternalRequestTopic(opts.tenant, opts.module, opts.device, "set");
   const availabilityTopic = buildInternalStatusTopic(opts.tenant, opts.module, opts.device);
+  const display = opts.moduleName ?? opts.module;
 
   const payload: Record<string, unknown> = {
     name: opts.name,
@@ -122,8 +129,9 @@ export function haSwitchDiscovery(opts: {
     availability_template: "{{ value_json.state }}",
     device: {
       identifiers: [deviceId],
-      name: `${opts.module} ${opts.device}`,
+      name: `${display} ${opts.device}`,
       manufacturer: "terraOS",
+      suggested_area: display,
     },
   };
 
@@ -140,13 +148,15 @@ export function haSwitchDiscovery(opts: {
 export function haModuleConfidenceDiscovery(
   tenant: string,
   mod: string,
+  moduleName?: string | null,
 ): { topic: string; payload: Record<string, unknown> } {
   // Contrato v0.5.0: terra/{tenant}/{module}/confidence — 4 segmentos
   const uniqueId = `terra_${tenant}_${mod}_confidence`;
   const stateTopic = `terra/${tenant}/${mod}/confidence`;
   const deviceId = `terra_${tenant}_${mod}`;
+  const display = moduleName ?? mod;
   const payload: Record<string, unknown> = {
-    name: `Módulo ${mod} Confianza`,
+    name: `${display} Confianza`,
     unique_id: uniqueId,
     state_topic: stateTopic,
     value_template: "{{ value_json.v }}",
@@ -155,8 +165,9 @@ export function haModuleConfidenceDiscovery(
     state_class: "measurement",
     device: {
       identifiers: [deviceId],
-      name: `Módulo ${mod}`,
+      name: `Módulo ${display}`,
       manufacturer: "terraOS",
+      suggested_area: display,
     },
   };
   const topic = `homeassistant/sensor/${uniqueId}/config`;
@@ -166,21 +177,24 @@ export function haModuleConfidenceDiscovery(
 export function haModuleHealthDiscovery(
   tenant: string,
   mod: string,
+  moduleName?: string | null,
 ): { topic: string; payload: Record<string, unknown> } {
   // Contrato v0.5.0: terra/{tenant}/{module}/health — 4 segmentos
   const uniqueId = `terra_${tenant}_${mod}_health`;
   const stateTopic = `terra/${tenant}/${mod}/health`;
   const deviceId = `terra_${tenant}_${mod}`;
+  const display = moduleName ?? mod;
   const payload: Record<string, unknown> = {
-    name: `Módulo ${mod} Salud`,
+    name: `${display} Salud`,
     unique_id: uniqueId,
     state_topic: stateTopic,
     value_template: "{{ value_json.state }}",
     icon: "mdi:heart-pulse",
     device: {
       identifiers: [deviceId],
-      name: `Módulo ${mod}`,
+      name: `Módulo ${display}`,
       manufacturer: "terraOS",
+      suggested_area: display,
     },
   };
   const topic = `homeassistant/sensor/${uniqueId}/config`;
@@ -194,8 +208,10 @@ export function haModuleHealthDiscovery(
 export function buildDiscoveryConfigs(
   tenant: string,
   mod: string,
+  moduleName?: string | null,
 ): { topic: string; payload: Record<string, unknown> }[] {
   const configs: { topic: string; payload: Record<string, unknown> }[] = [];
+  const display = moduleName ?? mod;
 
   for (const s of SENSOR_DEFS) {
     configs.push(
@@ -204,9 +220,10 @@ export function buildDiscoveryConfigs(
         module: mod,
         device: s.device,
         metric: s.metric,
-        name: `${mod} ${s.name}`,
+        name: `${display} ${s.name}`,
         unit: s.unit,
         deviceClass: s.deviceClass,
+        moduleName,
       }),
     );
   }
@@ -217,15 +234,16 @@ export function buildDiscoveryConfigs(
         tenant,
         module: mod,
         device: sw.device,
-        name: `${mod} ${sw.name}`,
+        name: `${display} ${sw.name}`,
+        moduleName,
       }),
     );
   }
 
   // Sensores de módulo (plano plataforma 4 seg) — se publican junto al resto
   // al resolver identidad, en el mismo flujo existente (publishDiscovery).
-  configs.push(haModuleConfidenceDiscovery(tenant, mod));
-  configs.push(haModuleHealthDiscovery(tenant, mod));
+  configs.push(haModuleConfidenceDiscovery(tenant, mod, moduleName));
+  configs.push(haModuleHealthDiscovery(tenant, mod, moduleName));
 
   return configs;
 }
