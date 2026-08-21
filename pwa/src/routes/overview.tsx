@@ -104,11 +104,13 @@ export function OverviewPage() {
           tone={kpis?.avgConfidence == null ? "neutral" : kpis.avgConfidence >= 70 ? "ok" : kpis.avgConfidence >= 40 ? "warn" : "bad"}
         />
         <KpiCard
-          icon={<Sprout className="size-4" />} title="Campaña"
-          value={kpis?.campaign ? kpis.campaign.crop : "sin campaña"}
-          hint={kpis?.campaign ? `abierta ${timeAgo(kpis.campaign.opened_at)}` : "ninguna abierta (ADR-0021)"}
-          to="/sistema"
-          tone={kpis?.campaign ? "ok" : "neutral"}
+          icon={<Sprout className="size-4" />} title="Producción"
+          value={kpis ? (kpis.batches.open > 0 ? `${kpis.batches.open} ${kpis.batches.open === 1 ? "lote" : "lotes"}` : "sin lotes") : "…"}
+          hint={kpis?.batches.nextHarvest
+            ? `próxima cosecha: ${kpis.batches.nextHarvest.crop} (${kpis.batches.nextHarvest.code}) ${timeAgo(kpis.batches.nextHarvest.expectedEndAt)}`
+            : kpis?.batches.open ? "sin fin estimado en perfiles" : "abre un lote al trasplantar (ADR-0024)"}
+          to="/produccion"
+          tone={kpis?.batches.open ? "ok" : "neutral"}
         />
       </div>
 

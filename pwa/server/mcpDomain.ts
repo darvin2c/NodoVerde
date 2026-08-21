@@ -3,8 +3,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const MCP_DOMAIN_URL = process.env.MCP_DOMAIN_URL ?? "http://localhost:7760/mcp";
 
-// Cliente MCP de dominio: escrituras gobernadas (ADR-0021 resoluciones/campañas,
-// ADR-0022 provisionamiento de módulos). Conexión por llamada: simple y sin estado
+// Cliente MCP de dominio: escrituras gobernadas (ADR-0021 resoluciones,
+// ADR-0024 lotes, ADR-0022 provisionamiento de módulos). Conexión por llamada: simple y sin estado
 // que mantener; el costo es ms contra un servicio local.
 export async function callDomainTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   const client = new Client({ name: "terra-pwa", version: "0.3.0" });
@@ -96,4 +96,20 @@ export function updateTenant(args: {
 
 export function archiveTenant(args: { id: string; archived: boolean }): Promise<unknown> {
   return callDomainTool("archive_tenant", args);
+}
+
+// — Lotes de producción (ADR-0024) —
+
+export function openBatch(args: {
+  tenant: string;
+  crop: string;
+  modules: string[];
+  campaign?: string;
+  note?: string;
+}): Promise<unknown> {
+  return callDomainTool("open_batch", args);
+}
+
+export function closeBatch(args: { id: string; reason: string; note?: string }): Promise<unknown> {
+  return callDomainTool("close_batch", args);
 }

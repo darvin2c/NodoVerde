@@ -1,8 +1,8 @@
-// src/write.ts — pool de escritura gobernada (ADR-0021 + ADR-0022 + ADR-0023)
+// src/write.ts — pool de escritura gobernada (ADR-0024 + ADR-0022 + ADR-0023)
 // Única excepción al invariante read-only de db.ts.
-// Solo toca campaigns, alert_resolutions, modules, device_identities y tenants
+// Solo toca lotes, alert_resolutions, modules, device_identities y tenants
 // con statements explícitos INSERT/UPDATE. Telemetría, crop_profiles, etc.
-// siguen read-only. Nada se borra: retiro/archivado = timestamp.
+// siguen read-only. Nada se borra: retiro/archivado/cierre = timestamp.
 
 import pg from "pg";
 import crypto from "node:crypto";
@@ -140,49 +140,95 @@ export function filterInvariantAlerts(
 }
 
 // ---------------------------------------------------------------------------
-// DB operations — statements explícitos solo sobre campaigns y alert_resolutions
+// Lotes de producción (ADR-0024) — el ciclo biológico es la entidad.
+// Regla física: un módulo solo está en UN lote activo (validada en open_batch).
 // ---------------------------------------------------------------------------
 
-export type CampaignRow = {
+export type LoteRow = {
   id: string;
+  code: string;
   tenant: string;
   crop: string;
+  campaign: string | null;
   modules: unknown;
+  started_at: Date;
+  expected_end_at: Date | null;
+  closed_at: Date | null;
+  close_reason: string | null;
   profile_hash: string;
   memory_hash: string | null;
   memory_hash_close: string | null;
   note: string | null;
-  opened_at: Date;
-  closed_at: Date | null;
   state: string;
 };
 
-export async function getCurrentCampaignDb(tenant?: string): Promise<CampaignRow | null> {
-  if (tenant) {
-    const r = await writePool.query(
-      `SELECT id, tenant, crop, modules, profile_hash, memory_hash, memory_hash_close, note, opened_at, closed_at, state FROM campaigns WHERE tenant = $1 AND state = 'open' LIMIT 1`,
-      [tenant],
-    );
-    return (r.rows[0] as CampaignRow) ?? null;
-  }
-  const r = await writePool.query(
-    `SELECT id, tenant, crop, modules, profile_hash, memory_hash, memory_hash_close, note, opened_at, closed_at, state FROM campaigns WHERE state = 'open' ORDER BY opened_at DESC LIMIT 1`,
-  );
-  return (r.rows[0] as CampaignRow) ?? null;
+const LOTE_COLS = `id, code, tenant, crop, campaign, modules, started_at, expected_end_at, closed_at, close_reason, profile_hash, memory_hash, memory_hash_close, note, state`;
+
+export async function getBatchDb(id: string): Promise<LoteRow | null> {
+  const r = await writePool.query(`SELECT ${LOTE_COLS} FROM lotes WHERE id = $1`, [id]);
+  return (r.rows[0] as LoteRow) ?? null;
 }
 
-export async function listCampaignsDb(tenant?: string): Promise<CampaignRow[]> {
-  if (tenant) {
-    const r = await writePool.query(
-      `SELECT id, tenant, crop, modules, profile_hash, memory_hash, memory_hash_close, note, opened_at, closed_at, state FROM campaigns WHERE tenant = $1 ORDER BY opened_at DESC`,
-      [tenant],
-    );
-    return r.rows as CampaignRow[];
-  }
+export async function listBatchesDb(tenant?: string, state?: "open" | "closed"): Promise<LoteRow[]> {
   const r = await writePool.query(
-    `SELECT id, tenant, crop, modules, profile_hash, memory_hash, memory_hash_close, note, opened_at, closed_at, state FROM campaigns ORDER BY opened_at DESC`,
+    `SELECT ${LOTE_COLS} FROM lotes
+     WHERE ($1::text IS NULL OR tenant = $1) AND ($2::text IS NULL OR state = $2)
+     ORDER BY state = 'open' DESC, started_at DESC`,
+    [tenant ?? null, state ?? null],
   );
-  return r.rows as CampaignRow[];
+  return r.rows as LoteRow[];
+}
+
+/** Lotes activos que ocupan alguno de los módulos dados (regla: un módulo, un lote activo). */
+export async function getOccupiedModulesDb(tenant: string, moduleIds: string[]): Promise<Array<{ code: string; modules: unknown }>> {
+  if (moduleIds.length === 0) return [];
+  const r = await writePool.query(
+    `SELECT code, modules FROM lotes WHERE tenant = $1 AND state = 'open' AND modules ?| $2::text[]`,
+    [tenant, moduleIds],
+  );
+  return r.rows as Array<{ code: string; modules: unknown }>;
+}
+
+/** Lote activo que incluye al módulo, o null. Congelamiento ADR-0024. */
+export async function getOpenBatchWithModuleDb(tenant: string, moduleId: string): Promise<LoteRow | null> {
+  const r = await writePool.query(
+    `SELECT ${LOTE_COLS} FROM lotes WHERE tenant = $1 AND state = 'open' AND modules ? $2 LIMIT 1`,
+    [tenant, moduleId],
+  );
+  return (r.rows[0] as LoteRow) ?? null;
+}
+
+export async function insertBatchDb(fields: {
+  tenant: string;
+  crop: string;
+  campaign: string | null;
+  modulesJson: string;
+  expectedEndAt: Date | null;
+  profileHash: string;
+  memoryHash: string | null;
+  note: string | null;
+}): Promise<{ id: string; code: string }> {
+  const r = await writePool.query(
+    `INSERT INTO lotes (code, tenant, crop, campaign, modules, expected_end_at, profile_hash, memory_hash, note)
+     VALUES ('LOTE-' || lpad(nextval('lotes_code_seq')::text, 4, '0'), $1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+     RETURNING id, code`,
+    [fields.tenant, fields.crop, fields.campaign, fields.modulesJson, fields.expectedEndAt, fields.profileHash, fields.memoryHash, fields.note],
+  );
+  return r.rows[0] as unknown as { id: string; code: string };
+}
+
+export async function closeBatchDb(
+  id: string,
+  reason: string,
+  memoryHashClose: string | null,
+  note: string | null,
+): Promise<{ id: string; code: string; closed_at: Date } | null> {
+  const r = await writePool.query(
+    `UPDATE lotes SET memory_hash_close = $1, closed_at = now(), close_reason = $2, state = 'closed', note = COALESCE($3, note)
+     WHERE id = $4 AND state = 'open' RETURNING id, code, closed_at`,
+    [memoryHashClose, reason, note, id],
+  );
+  return (r.rows[0] as unknown as { id: string; code: string; closed_at: Date }) ?? null;
 }
 
 export async function listResolutionsDb(tenant: string): Promise<ResolutionRow[]> {
@@ -326,10 +372,10 @@ export function nextModuleId(existingIds: string[]): string {
   return `mod-${max + 1}`;
 }
 
-/** true si el módulo está en la lista congelada de una campaña (campaigns.modules = JSONB array de ids). */
-export function moduleInCampaign(campaignModules: unknown, moduleId: string): boolean {
+/** true si el módulo está en la lista congelada de un lote (lotes.modules = JSONB array de ids). */
+export function moduleInBatch(batchModules: unknown, moduleId: string): boolean {
   try {
-    const arr = typeof campaignModules === "string" ? JSON.parse(campaignModules) : campaignModules;
+    const arr = typeof batchModules === "string" ? JSON.parse(batchModules) : batchModules;
     return Array.isArray(arr) && arr.includes(moduleId);
   } catch {
     return false;
@@ -347,16 +393,6 @@ export async function getModuleDb(tenant: string, id: string): Promise<ModuleRow
 export async function listModuleIdsDb(tenant: string): Promise<string[]> {
   const r = await writePool.query(`SELECT id FROM modules WHERE tenant = $1`, [tenant]);
   return r.rows.map((row: { id: string }) => row.id);
-}
-
-/** Campaña abierta que incluye al módulo, o null. Congelamiento ADR-0021. */
-export async function getOpenCampaignWithModuleDb(tenant: string, moduleId: string): Promise<CampaignRow | null> {
-  const r = await writePool.query(
-    `SELECT id, tenant, crop, modules, profile_hash, memory_hash, memory_hash_close, note, opened_at, closed_at, state
-     FROM campaigns WHERE tenant = $1 AND state = 'open' AND modules ? $2 LIMIT 1`,
-    [tenant, moduleId],
-  );
-  return (r.rows[0] as CampaignRow) ?? null;
 }
 
 /** Inserta módulo con id mod-N autogenerado. Reintenta una vez ante race de creación concurrente. */

@@ -7,7 +7,7 @@ import { getDb, type TerraDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
-import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant } from "./mcpDomain.js";
+import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant, openBatch, closeBatch } from "./mcpDomain.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -718,6 +718,74 @@ export const appRouter = t.router({
       }),
   }),
   // ── OVERVIEW: KPIs de portada ──
+  // ── LOTES de producción (ADR-0024): lectura directa, escritura delegada al MCP de dominio ──
+  batches: t.router({
+    list: t.procedure
+      .input(z.object({ tenant: z.string().optional(), state: z.enum(["open", "closed"]).optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenant = input?.tenant ?? null;
+        const state = input?.state ?? null;
+        try {
+          const res = await rawDb(ctx.db).execute(sql`
+            SELECT l.id, l.code, l.tenant, l.crop, l.campaign, l.modules, l.started_at, l.expected_end_at,
+                   l.closed_at, l.close_reason, l.note, l.state,
+                   cp.cycle_days
+            FROM lotes l
+            JOIN crop_profiles cp ON cp.name = l.crop
+            WHERE (${tenant}::text IS NULL OR l.tenant = ${tenant})
+              AND (${state}::text IS NULL OR l.state = ${state})
+            ORDER BY l.state = 'open' DESC, l.started_at DESC
+          `);
+          // Nombres humanos de los módulos ocupados (ADR-0022)
+          const namesRes = await rawDb(ctx.db).execute(sql`
+            SELECT tenant, id, name FROM modules
+            WHERE (${tenant}::text IS NULL OR tenant = ${tenant})
+          `);
+          const names = new Map(
+            (namesRes.rows as Array<{ tenant: string; id: string; name: string | null }>).map((m) => [`${m.tenant}/${m.id}`, m.name ?? m.id])
+          );
+          return (res.rows as Array<Record<string, unknown>>).map((r) => {
+            const modIds: string[] = Array.isArray(r.modules) ? (r.modules as string[]) : JSON.parse(String(r.modules));
+            return {
+              id: r.id as string,
+              code: r.code as string,
+              tenant: r.tenant as string,
+              crop: r.crop as string,
+              campaign: (r.campaign as string | null) ?? null,
+              modules: modIds.map((id) => ({ id, name: names.get(`${r.tenant}/${id}`) ?? id })),
+              startedAt: r.started_at as string,
+              expectedEndAt: (r.expected_end_at as string | null) ?? null,
+              closedAt: (r.closed_at as string | null) ?? null,
+              closeReason: (r.close_reason as string | null) ?? null,
+              note: (r.note as string | null) ?? null,
+              state: r.state as "open" | "closed",
+              cycleDays: (r.cycle_days as number | null) ?? null
+            };
+          });
+        } catch {
+          return [];
+        }
+      }),
+
+    open: t.procedure
+      .input(z.object({
+        tenant: z.string().min(1),
+        crop: z.string().min(1),
+        modules: z.array(z.string()).min(1),
+        campaign: z.string().optional(),
+        note: z.string().optional()
+      }))
+      .mutation(async ({ input }) => openBatch(input)),
+
+    close: t.procedure
+      .input(z.object({
+        id: z.string().uuid(),
+        reason: z.enum(["cosecha", "venta", "perdida", "otro"]),
+        note: z.string().optional()
+      }))
+      .mutation(async ({ input }) => closeBatch(input))
+  }),
+
   overview: t.router({
     // ── Feed de actividad unificado: qué pasó mientras no mirabas ──
     // Mezcla alertas + movimientos + acciones del portero + órdenes de trabajo.
@@ -784,7 +852,7 @@ export const appRouter = t.router({
         let totalModules = 0;
         let openAlerts = { warn: 0, critical: 0 };
         let todaySpend: number | null = tenant ? 0 : null;
-        let campaign: { id: string; crop: string; opened_at: string } | null = null;
+        let batches: { open: number; nextHarvest: { code: string; crop: string; expectedEndAt: string } | null } = { open: 0, nextHarvest: null };
         let lastTelemetry: string | null = null;
         try {
           const res = await rawDb(ctx.db).execute(sql`
@@ -813,13 +881,18 @@ export const appRouter = t.router({
           todaySpend = tenant ? Number(row?.today_spend ?? 0) : null;
           lastTelemetry = (row?.last_telemetry as string | null) ?? null;
 
-          // Campaña abierta: solo tiene sentido por finca; en modo Todas se reporta la primera (informativo)
-          const campRes = await rawDb(ctx.db).execute(
-            sql`SELECT id, tenant, crop, opened_at FROM campaigns
+          // Lotes activos (ADR-0024): conteo + próxima cosecha esperada (la más cercana con fin estimado)
+          const bRes = await rawDb(ctx.db).execute(
+            sql`SELECT code, crop, expected_end_at FROM lotes
                 WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null}) AND state = 'open'
-                ORDER BY opened_at LIMIT 1`
+                ORDER BY expected_end_at ASC NULLS LAST`
           );
-          campaign = (campRes.rows[0] as { id: string; crop: string; opened_at: string } | undefined) ?? null;
+          const bRows = bRes.rows as Array<{ code: string; crop: string; expected_end_at: string | null }>;
+          const next = bRows.find((b) => b.expected_end_at != null);
+          batches = {
+            open: bRows.length,
+            nextHarvest: next ? { code: next.code, crop: next.crop, expectedEndAt: next.expected_end_at as string } : null
+          };
         } catch { /* KPIs a cero = honesto */ }
 
         // Confianza media de módulos con dato vivo
@@ -850,7 +923,7 @@ export const appRouter = t.router({
           policyReachable,
           todaySpend,
           avgConfidence: confidenceN > 0 ? confidenceSum / confidenceN : null,
-          campaign,
+          batches,
           lastTelemetry,
           ts: Date.now()
         };

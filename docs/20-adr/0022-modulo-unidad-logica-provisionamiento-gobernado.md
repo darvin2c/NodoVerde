@@ -34,7 +34,7 @@ Decisiones de alcance tomadas en la misma discusión:
    - `retire_module` (set `retired_at`; NADA se borra — ADR-0011 aplicado a dominio: telemetría, alertas e imputación financiera histórica quedan intactas)
    - `claim_device` (inserta `device_identities`; un hw_id = un claim; un módulo = un fierro activo)
 
-3. **Congelamiento de campaña (ADR-0021) extendido**: cambio de cultivo y retiro se RECHAZAN si el módulo está en la campaña abierta del tenant (`campaigns.modules ? module`). Son la misma invariante: la campaña congeló crop + módulos + profile_hash al abrir.
+3. **Congelamiento por lote activo (ADR-0024, antes ADR-0021)**: cambio de cultivo y retiro se RECHAZAN si el módulo está en un lote activo del tenant (`lotes.modules ? module` con `state='open'`). El lote congeló crop + módulos + profile_hash al abrir; mientras vive, el módulo no cambia de identidad.
 
 4. **Propagación de nombre a HA**: el router incluye `suggested_area` (nombre del módulo, fallback al id) en cada payload de discovery — HA crea el área y agrupa los dispositivos automáticamente. Tras cada escritura de módulo, mcp-domain publica `terra/{tenant}/{module}/meta` (plano plataforma 4-seg, contrato v0.8.0, no retained, best-effort); el router suscrito refresca el discovery sin reinicio, y en `module_retired` borra las entidades HA (payload vacío retenido) y deja de aceptar telemetría del módulo. Si el evento se pierde, el router recupera el estado fresco de la DB en su próximo arranque — la DB sigue siendo la única fuente de verdad.
 
@@ -44,7 +44,7 @@ Decisiones de alcance tomadas en la misma discusión:
 
 - El cerebro dice "Mesa Norte" en el reporte diario (`get_farm_context`, `daily_report_data` incluyen `name`).
 - Limitación conocida y aceptada: `suggested_area` de HA solo se aplica si el dispositivo no tiene área asignada manualmente; un rename posterior actualiza el nombre del dispositivo pero no mueve el área (requeriría API de HA; 2 clicks manuales en Settings → Areas).
-- Un módulo retirado con campaña posterior no entra en nuevas campañas (`open_campaign` filtra retirados).
+- Un módulo retirado no entra en lotes nuevos (`open_batch` filtra retirados, ADR-0024).
 - El sim no cambia: sus 4 nodos demo siguen claimeados por seed; un módulo creado por PWA sin fierro simplemente no tiene telemetría (honesto).
 
 ## Alternativas consideradas

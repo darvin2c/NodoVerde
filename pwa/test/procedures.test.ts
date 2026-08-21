@@ -337,3 +337,43 @@ describe("overview.activity — feed unificado", () => {
     expect(await callerWith(db).overview.activity({})).toEqual([]);
   });
 });
+
+describe("batches.list — lotes de producción (ADR-0024)", () => {
+  it("mapea lote con módulos nombrados y campaign etiqueta", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{
+        id: "uuid-1", code: "LOTE-0003", tenant: "demo", crop: "lechuga", campaign: "invierno-2026",
+        modules: ["mod-1", "mod-2"], started_at: "2026-08-21T10:00:00Z", expected_end_at: "2026-10-05T10:00:00Z",
+        closed_at: null, close_reason: null, note: null, state: "open", cycle_days: 45
+      }]})
+      .mockResolvedValueOnce({ rows: [
+        { tenant: "demo", id: "mod-1", name: "Mesa Norte" },
+        { tenant: "demo", id: "mod-2", name: null }
+      ]});
+    const res = await callerWith({ execute } as never).batches.list({ tenant: "demo" });
+    expect(res).toHaveLength(1);
+    expect(res[0]).toMatchObject({
+      code: "LOTE-0003", crop: "lechuga", campaign: "invierno-2026", state: "open", cycleDays: 45,
+      modules: [{ id: "mod-1", name: "Mesa Norte" }, { id: "mod-2", name: "mod-2" }]
+    });
+    expect(res[0].closedAt).toBeNull();
+  });
+
+  it("modules como string JSON (pg TEXT defensivo) se parsea igual", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{
+        id: "uuid-2", code: "LOTE-0001", tenant: "demo", crop: "tomate", campaign: null,
+        modules: "[\"mod-4\"]", started_at: "2026-08-01T10:00:00Z", expected_end_at: null,
+        closed_at: "2026-08-20T10:00:00Z", close_reason: "cosecha", note: "primera", state: "closed", cycle_days: 90
+      }]})
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await callerWith({ execute } as never).batches.list({});
+    expect(res[0].modules).toEqual([{ id: "mod-4", name: "mod-4" }]);
+    expect(res[0]).toMatchObject({ campaign: null, closeReason: "cosecha", state: "closed" });
+  });
+
+  it("DB caída devuelve lista vacía honesta", async () => {
+    const db = { execute: vi.fn().mockRejectedValue(new Error("db down")) } as unknown as never;
+    expect(await callerWith(db).batches.list({})).toEqual([]);
+  });
+});
