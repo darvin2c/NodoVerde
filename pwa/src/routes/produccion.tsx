@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger
 } from "@/components/ui/dialog.tsx";
-import { formatDateTime, formatShort, timeAgo } from "@/lib/format.ts";
+import { formatDateTime, formatDay, formatShort, timeAgo } from "@/lib/format.ts";
 import { cn } from "@/lib/utils.ts";
 
 // ── Lotes de producción (ADR-0024) ──────────────────────────────────────────
@@ -80,15 +80,6 @@ export function ProduccionPage() {
     return [...counts.entries()];
   }, [open]);
 
-  // Escala del timeline: desde el lote más viejo hasta el fin esperado más lejano (o hoy +7d)
-  const scale = useMemo(() => {
-    if (open.length === 0) return null;
-    const now = Date.now();
-    const t0 = Math.min(...open.map((l) => +new Date(l.startedAt)), now - DAY);
-    const t1 = Math.max(...open.map((l) => (l.expectedEndAt ? +new Date(l.expectedEndAt) : now + 7 * DAY)), now + 3 * DAY);
-    return { t0, t1, pct: (t: number) => ((t - t0) / (t1 - t0)) * 100 };
-  }, [open]);
-
   // Ocupación: módulo → lote activo
   const occupancy = useMemo(() => {
     const map = new Map<string, Lote>();
@@ -134,22 +125,20 @@ export function ProduccionPage() {
         </div>
       )}
 
-      {/* Timeline de lotes activos */}
+      {/* Progreso por lote: cada barra es SU ciclo — el relleno es lo vivido */}
       <Card>
         <CardHeader>
           <CardTitle>Línea de tiempo</CardTitle>
-          <CardDescription>cada barra es un lote: inicio → cosecha esperada · la línea vertical es hoy</CardDescription>
+          <CardDescription>cada barra es un lote: el relleno es lo vivido del ciclo — 100% = cosecha esperada</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {(!scale || open.length === 0) && (
+          {open.length === 0 && (
             <p className="text-sm text-muted-foreground">
               Nada en producción. Un lote nace cuando trasplantas, compras o siembras — y muere con la cosecha.
             </p>
           )}
-          {scale && open.map((l) => {
+          {open.map((l) => {
             const d = daysOf(l);
-            const startPct = scale.pct(+new Date(l.startedAt));
-            const endPct = l.expectedEndAt ? scale.pct(+new Date(l.expectedEndAt)) : scale.pct(Date.now() + 7 * DAY);
             return (
               <div key={l.id} className="flex items-center gap-3">
                 <div className="w-52 shrink-0 min-w-0">
@@ -162,49 +151,38 @@ export function ProduccionPage() {
                     {l.campaign ? ` · ${l.campaign}` : ""}
                   </p>
                 </div>
-                <div className="relative flex-1 h-11 rounded-md bg-muted/50">
-                  {/* Barra del lote */}
-                  <div
-                    className={cn("absolute top-1.5 bottom-1.5 rounded-md overflow-hidden", cropColor(l.crop), d.overdue && "ring-2 ring-destructive")}
-                    style={{ left: `${startPct}%`, width: `${Math.max(2, endPct - startPct)}%` }}
-                    title={`${l.code}: ${formatShort(l.startedAt)} → ${l.expectedEndAt ? formatShort(l.expectedEndAt) : "sin fin estimado"}`}
-                  >
-                    {/* Progreso: porción ya vivida más oscura */}
-                    {d.pct != null && (
-                      <div className="absolute inset-y-0 left-0 bg-black/25" style={{ width: `${d.pct}%` }} />
-                    )}
-                  </div>
-                  {/* Etiqueta de días sobre la barra */}
-                  <span
-                    className="absolute top-1/2 -translate-y-1/2 text-[10px] font-medium text-muted-foreground whitespace-nowrap"
-                    style={{ left: `calc(${Math.min(endPct, 96)}% + 4px)` }}
-                  >
-                    {d.total != null
-                      ? d.overdue
-                        ? `día ${d.elapsed} de ${d.total} — pasado`
-                        : `día ${d.elapsed} de ${d.total}`
-                      : `día ${d.elapsed} · sin fin estimado`}
-                  </span>
+                {/* Barra = ciclo completo del lote; relleno = días ya vividos */}
+                <div
+                  className={cn(
+                    "relative flex-1 h-6 rounded-md bg-muted/50 overflow-hidden",
+                    d.overdue && "ring-2 ring-destructive"
+                  )}
+                  title={`${l.code}: inicio ${formatDay(l.startedAt)}${l.expectedEndAt ? ` → cosecha esperada ${formatDay(l.expectedEndAt)}` : ""}`}
+                >
+                  {d.pct != null && (
+                    <div
+                      className={cn("absolute inset-y-0 left-0", d.overdue ? "bg-destructive" : cropColor(l.crop))}
+                      style={{ width: `${Math.max(d.pct, 1.5)}%` }}
+                    />
+                  )}
                 </div>
+                {/* Etiqueta legible: día actual, avance % y fecha de cosecha */}
+                <p
+                  className={cn(
+                    "w-64 shrink-0 text-xs text-right font-medium whitespace-nowrap",
+                    d.overdue ? "text-destructive" : "text-foreground"
+                  )}
+                >
+                  {d.total != null
+                    ? d.overdue
+                      ? `día ${d.elapsed} de ${d.total} · cosecha pasada (${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""})`
+                      : `día ${d.elapsed} de ${d.total} · ${d.pct}% · cosecha ${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""}`
+                    : `día ${d.elapsed} · sin fin estimado`}
+                </p>
                 <CerrarLoteDialog lote={l} />
               </div>
             );
           })}
-          {/* Línea de hoy */}
-          {scale && open.length > 0 && (
-            <div className="flex items-center gap-3">
-              <div className="w-52 shrink-0" />
-              <div className="relative flex-1 h-4">
-                <div className="absolute inset-y-0 w-px bg-primary" style={{ left: `${scale.pct(Date.now())}%` }} />
-                <span
-                  className="absolute -top-1 text-[10px] text-primary font-medium -translate-x-1/2"
-                  style={{ left: `${scale.pct(Date.now())}%` }}
-                >
-                  hoy
-                </span>
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
 

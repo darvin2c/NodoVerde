@@ -2,6 +2,7 @@
 
 const dt = new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short" });
 const dtShort = new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+const dtDay = new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short" });
 
 // Moneda por finca (ADR-0023): cache de formateadores, fallback a PEN
 const moneyCache = new Map<string, Intl.NumberFormat>();
@@ -20,6 +21,11 @@ export function formatDateTime(iso: string | number | Date): string {
 
 export function formatShort(iso: string | number | Date): string {
   return dtShort.format(new Date(iso));
+}
+
+/** Solo día+mes ("25 set") — para fechas de ciclo biológico donde la hora es ruido. */
+export function formatDay(iso: string | number | Date): string {
+  return dtDay.format(new Date(iso));
 }
 
 export function timeAgo(iso: string | number | Date, nowMs = Date.now()): string {
