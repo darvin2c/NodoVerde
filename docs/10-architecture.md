@@ -94,6 +94,7 @@ Toda función tiene exactamente un dueño. Quien no es dueño, tiene prohibido e
 | Invariante de presupuesto de tokens | **Cron de tokens** (lee usage del gateway, calcula USD en código, registra en ledger, ADR-0021) | El LLM calculando o reportando su propio gasto |
 | Registro de campaña (perfil + memoria por ciclo) | **MCP terra-domain** (tabla `campaigns`, `open/close_campaign`, hashes en código, ADR-0021) | Markdown del agente como registro primario |
 | Provisionamiento de módulos (`modules`, claiming `device_identities`) | **MCP terra-domain** (`create/update/retire_module`, `claim_device`, ADR-0022; nombre propagado a HA por el router vía evento `meta`) | PWA/agente escribiendo `modules` directo a la DB |
+| Gestión de fincas (`tenants`: crear/editar/archivar, tz derivada, moneda) | **MCP terra-domain** (`create/update/archive_tenant`, ADR-0023; id slug inmutable, nada se borra) | PWA/agente escribiendo `tenants` directo; sumas globales que mezclen monedas |
 ## Flujo de una decisión (lazo cerrado)
 
 1. Simulador/edge publica telemetría → MQTT → Telegraf → TimescaleDB.

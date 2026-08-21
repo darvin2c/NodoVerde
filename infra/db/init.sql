@@ -8,12 +8,14 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- (get_farm_context). Jamás se hardcodea en prompts ni skills.
 -- Quien la escribe: aprovisionamiento (sim supervisor en sim; edge en Fase 5).
 CREATE TABLE IF NOT EXISTS tenants (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,              -- nombre display de la finca
+  id TEXT PRIMARY KEY,             -- slug elegido por el usuario (^[a-z0-9][a-z0-9-]*$), inmutable
+  name TEXT NOT NULL,              -- nombre display de la finca (mutable)
   location_name TEXT,              -- zona humana (ej: "Lambayeque, Perú")
-  lat DOUBLE PRECISION,            -- coordenadas para clima/ET0
+  lat DOUBLE PRECISION,            -- coordenadas para clima/ET0 (obligatorias vía create_tenant)
   lon DOUBLE PRECISION,
-  tz TEXT,                         -- IANA (ej: America/Lima) — reportes en hora local de la finca
+  tz TEXT,                         -- IANA derivada de lat/lon (tz-lookup) — reportes en hora local
+  currency TEXT NOT NULL DEFAULT 'PEN', -- ISO 4217 — los resúmenes financieros nunca mezclan monedas
+  archived_at TIMESTAMPTZ,         -- finca archivada: sale del selector, historia conservada (nada se borra)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

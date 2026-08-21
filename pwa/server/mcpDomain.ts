@@ -69,3 +69,31 @@ export function claimDevice(args: {
 }): Promise<unknown> {
   return callDomainTool("claim_device", args);
 }
+
+// — Gestión de fincas (ADR-0023) —
+
+export function createTenant(args: {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  location_name?: string;
+  currency?: string;
+}): Promise<unknown> {
+  return callDomainTool("create_tenant", args);
+}
+
+export function updateTenant(args: {
+  id: string;
+  name?: string;
+  location_name?: string | null;
+  lat?: number;
+  lon?: number;
+  currency?: string;
+}): Promise<unknown> {
+  return callDomainTool("update_tenant", args);
+}
+
+export function archiveTenant(args: { id: string; archived: boolean }): Promise<unknown> {
+  return callDomainTool("archive_tenant", args);
+}

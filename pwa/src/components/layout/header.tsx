@@ -1,11 +1,16 @@
 import { useRouterState, Link } from "@tanstack/react-router";
-import { Bell, Moon, Sun, Search } from "lucide-react";
+import { Bell, Moon, Sun, Search, ChevronsUpDown, MapPin } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { trpc } from "../../trpc.ts";
 import { useTheme } from "@/components/theme-provider.tsx";
+import { useTenant } from "@/components/tenant-provider.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Separator } from "@/components/ui/separator.tsx";
 import { SidebarTrigger } from "@/components/ui/sidebar.tsx";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu.tsx";
 import {
   Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator
 } from "@/components/ui/breadcrumb.tsx";
@@ -17,16 +22,18 @@ const PATH_LABELS: Record<string, string> = {
   "/finanzas": "Finanzas",
   "/aprobaciones": "Aprobaciones",
   "/camaras": "Cámaras",
+  "/fincas": "Fincas",
   "/sistema": "Sistema"
 };
 
 export function Header({ onOpenCommand }: { onOpenCommand: () => void }) {
   const { theme, toggle } = useTheme();
+  const { active, setActive, tenants, farmName } = useTenant();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   const { data: kpis } = useQuery({
-    queryKey: ["overview.kpis"],
-    queryFn: () => trpc.overview.kpis.query({ tenant: "demo" }),
+    queryKey: ["overview.kpis", active],
+    queryFn: () => trpc.overview.kpis.query(active ? { tenant: active } : undefined),
     refetchInterval: 15000
   });
   const openAlerts = (kpis?.openAlerts.warn ?? 0) + (kpis?.openAlerts.critical ?? 0);
@@ -68,6 +75,32 @@ export function Header({ onOpenCommand }: { onOpenCommand: () => void }) {
       </Breadcrumb>
 
       <div className="ml-auto flex items-center gap-1">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button variant="outline" size="sm" className="gap-1.5 max-w-48" aria-label="Seleccionar finca" />}
+          >
+            <MapPin className="size-3.5 shrink-0" />
+            <span className="truncate text-xs">{active ? farmName(active) : "Todas las fincas"}</span>
+            <ChevronsUpDown className="size-3 shrink-0 opacity-50" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Finca activa</DropdownMenuLabel>
+              <DropdownMenuItem onClick={() => setActive(null)}>
+                Todas las fincas
+              </DropdownMenuItem>
+              {tenants.map((t) => (
+                <DropdownMenuItem key={t.id} onClick={() => setActive(t.id)}>
+                  {t.name}
+                  <span className="ml-auto text-xs text-muted-foreground">{t.id}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem render={<Link to="/fincas" />}>Administrar fincas…</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
         <Button variant="outline" size="sm" className="hidden sm:flex text-muted-foreground gap-2" onClick={onOpenCommand}>
           <Search className="size-3.5" />
           <span className="text-xs">Buscar…</span>

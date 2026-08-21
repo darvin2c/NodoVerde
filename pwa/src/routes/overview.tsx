@@ -1,18 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Boxes, TriangleAlert, CheckSquare, Wallet, Gauge, Sprout } from "lucide-react";
+import { Boxes, TriangleAlert, CheckSquare, Wallet, Gauge, Sprout, MapPinned } from "lucide-react";
 import { trpc } from "../trpc.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
+import { Progress } from "@/components/ui/progress.tsx";
 import { useLiveModules, healthVariant } from "@/lib/live.ts";
 import { remediationFor } from "@/lib/remediation.ts";
-import { formatPEN, formatDateTime, timeAgo } from "@/lib/format.ts";
+import { formatMoney, formatDateTime, timeAgo } from "@/lib/format.ts";
 
 export function OverviewPage() {
+  const { active, farmName, farmCurrency, setActive } = useTenant();
   const { data: kpis, isLoading } = useQuery({
-    queryKey: ["overview.kpis"],
-    queryFn: () => trpc.overview.kpis.query({ tenant: "demo" }),
+    queryKey: ["overview.kpis", active],
+    queryFn: () => trpc.overview.kpis.query(active ? { tenant: active } : undefined),
     refetchInterval: 15000
   });
   const { data: system } = useQuery({
@@ -21,14 +24,21 @@ export function OverviewPage() {
     refetchInterval: 10000
   });
   const { data: openAlerts } = useQuery({
-    queryKey: ["alerts.list", "open"],
-    queryFn: () => trpc.alerts.list.query({ tenant: "demo", limit: 6, onlyOpen: true }),
+    queryKey: ["alerts.list", "open", active],
+    queryFn: () => trpc.alerts.list.query({ tenant: active ?? undefined, limit: 6, onlyOpen: true }),
     refetchInterval: 15000
   });
   // Nombres humanos de módulos (ADR-0022) para las tarjetas en vivo
   const { data: modulesList } = useQuery({
     queryKey: ["modules.list"],
     queryFn: () => trpc.modules.list.query()
+  });
+  // Modo "Todas las fincas": resumen agregado por finca (ADR-0023)
+  const { data: farmsSummary } = useQuery({
+    queryKey: ["farms.summary"],
+    queryFn: () => trpc.farms.summary.query(),
+    refetchInterval: 20000,
+    enabled: active === null
   });
   const moduleNames = new Map((modulesList ?? []).map((m) => [`${m.tenant}/${m.id}`, m.name ?? m.id]));
   const live = useLiveModules();
@@ -44,6 +54,49 @@ export function OverviewPage() {
 
   return (
     <div className="space-y-6">
+      {/* Modo "Todas las fincas": una tarjeta por finca (ADR-0023) */}
+      {active === null && farmsSummary && farmsSummary.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {farmsSummary.map((f) => {
+            const openN = f.openAlerts.warn + f.openAlerts.critical;
+            return (
+              <Card key={f.id} className="cursor-pointer hover:bg-accent/40 transition-colors" onClick={() => setActive(f.id)}>
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-base flex items-center gap-1.5">
+                      <MapPinned className="size-4" /> {f.name}
+                    </CardTitle>
+                    <Badge variant={f.openAlerts.critical > 0 ? "destructive" : openN > 0 ? "secondary" : "outline"}>
+                      {openN > 0 ? `${openN} alertas` : "ok"}
+                    </Badge>
+                  </div>
+                  <CardDescription>{f.id}{f.locationName ? ` · ${f.locationName}` : ""}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-center text-sm">
+                    <div className="rounded-md border p-2">
+                      <p className="text-lg font-semibold">{f.totalModules}</p>
+                      <p className="text-[10px] text-muted-foreground uppercase">módulos</p>
+                    </div>
+                    <div className="rounded-md border p-2">
+                      <p className="text-lg font-semibold">{formatMoney(f.todaySpend, f.currency)}</p>
+                      <p className="text-[10px] text-muted-foreground uppercase">gasto hoy</p>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                      <span>confianza</span>
+                      <span>{f.avgConfidence != null ? `${Math.round(f.avgConfidence)}%` : "—"}</span>
+                    </div>
+                    <Progress value={f.avgConfidence ?? 0} />
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
       {/* KPIs */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <KpiCard
@@ -69,8 +122,8 @@ export function OverviewPage() {
         />
         <KpiCard
           icon={<Wallet className="size-4" />} title="Gasto de hoy"
-          value={formatPEN(kpis?.todaySpend ?? 0)}
-          hint="movimientos del día (SQL)"
+          value={kpis?.todaySpend != null ? formatMoney(kpis.todaySpend, active ? farmCurrency(active) : "PEN") : "—"}
+          hint={kpis?.todaySpend != null ? "movimientos del día (SQL)" : "multi-moneda: ver tarjetas por finca"}
           to="/finanzas"
           tone="neutral"
         />
@@ -108,7 +161,7 @@ export function OverviewPage() {
                   <div className="min-w-0">
                     <p className="text-sm font-medium truncate">{rem.title}</p>
                     <p className="text-xs text-muted-foreground truncate">
-                      {a.module}{a.device ? ` · ${a.device}` : ""} · {timeAgo(a.time)}
+                      {active === null ? `${farmName(a.tenant)} · ` : ""}{a.module}{a.device ? ` · ${a.device}` : ""} · {timeAgo(a.time)}
                     </p>
                   </div>
                   <Badge variant={a.severity === "critical" ? "destructive" : "warn"}>{a.severity}</Badge>
@@ -131,7 +184,9 @@ export function OverviewPage() {
             {Object.keys(live.health).length === 0 && (
               <p className="text-sm text-muted-foreground">Sin datos de salud en vivo — ¿está corriendo el watchdog?</p>
             )}
-            {Object.entries(live.health).map(([key, h]) => {
+            {Object.entries(live.health)
+              .filter(([key]) => active === null || key.startsWith(`${active}/`))
+              .map(([key, h]) => {
               const mod = key.split("/")[1] ?? key;
               const conf = live.confidence[key];
               return (
@@ -140,7 +195,7 @@ export function OverviewPage() {
                   <div className="min-w-0">
                     <p className="text-sm font-medium">{moduleNames.get(key) ?? mod}</p>
                     <p className="text-xs text-muted-foreground">
-                      {mod} · confianza {conf ? `${Math.round(conf.v)}%` : "—"}
+                      {active === null ? `${farmName(key.split("/")[0])} · ` : ""}{mod} · confianza {conf ? `${Math.round(conf.v)}%` : "—"}
                     </p>
                   </div>
                   <Badge variant={healthVariant(h.state)}>{h.state}</Badge>
@@ -165,11 +220,9 @@ export function OverviewPage() {
           <span className="text-xs text-muted-foreground">
             última telemetría: {system?.lastTelemetry ? `${formatDateTime(system.lastTelemetry)} (${timeAgo(system.lastTelemetry)})` : "sin datos"}
           </span>
-          {system?.farm && (
-            <span className="text-xs text-muted-foreground">
-              · {system.farm.name}{system.farm.location_name ? ` — ${system.farm.location_name}` : ""}
-            </span>
-          )}
+          <span className="text-xs text-muted-foreground">
+            · {active === null ? "Todas las fincas" : farmName(active)}
+          </span>
           <Link to="/sistema" className="ml-auto text-xs text-primary underline underline-offset-4">detalle →</Link>
         </CardContent>
       </Card>

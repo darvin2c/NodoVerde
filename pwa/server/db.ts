@@ -9,6 +9,12 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://terra:changeme@loca
 export const tenants = pgTable("tenants", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  locationName: text("location_name"),
+  lat: doublePrecision("lat"),
+  lon: doublePrecision("lon"),
+  tz: text("tz"),
+  currency: text("currency").notNull().default("PEN"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 

@@ -32,8 +32,17 @@ import {
   updateModuleDb,
   retireModuleDb,
   claimDeviceDb,
+  isValidTenantId,
+  isValidCurrency,
+  isValidLatLon,
+  listTenantsDb,
+  getTenantDb,
+  insertTenantDb,
+  updateTenantDb,
+  archiveTenantDb,
 } from "./write.js";
 import { publishModuleMeta } from "./bus.js";
+import tzLookup from "tz-lookup";
 
 function summaryText(obj: unknown, maxLen = 4000): string {
   const s = JSON.stringify(obj, null, 2);
@@ -682,6 +691,169 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text }],
         structuredContent: { hw_id, tenant, module: moduleId } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — list_tenants -----------------------------------------------------------
+  server.registerTool(
+    "list_tenants",
+    {
+      title: "Listar fincas",
+      description: "Lista las fincas (tenants) registradas. Por defecto solo activas; include_archived=true incluye las archivadas.",
+      inputSchema: {
+        include_archived: z.boolean().optional().describe("Incluir fincas archivadas (default false)"),
+      },
+    },
+    async ({ include_archived }) => {
+      const rows = await listTenantsDb(include_archived ?? false);
+      return {
+        content: [{ type: "text", text: `Fincas: ${rows.length}\n${summaryText(rows)}` }],
+        structuredContent: { tenants: rows } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — create_tenant ----------------------------------------------------------
+  server.registerTool(
+    "create_tenant",
+    {
+      title: "Crear finca",
+      description:
+        "Crea una finca (tenant, ADR-0023). El id es un slug elegido por el usuario (^[a-z0-9][a-z0-9-]*$), INMUTABLE: queda gravado en topics MQTT e historia. lat/lon son obligatorias (clima/ET0); la zona horaria se deriva offline de las coordenadas. La finca nace vacía: sin módulos ni telemetría.",
+      inputSchema: {
+        id: z.string().describe("Slug inmutable (ej: 'finca-norte') — visible en topics MQTT"),
+        name: z.string().min(1).describe("Nombre humano (ej: 'Finca Norte')"),
+        lat: z.number().describe("Latitud (obligatoria — clima/ET0)"),
+        lon: z.number().describe("Longitud (obligatoria — clima/ET0)"),
+        location_name: z.string().optional().describe("Zona humana (ej: 'Lambayeque, Perú')"),
+        currency: z.string().optional().describe("Moneda ISO 4217 (default PEN)"),
+      },
+    },
+    async ({ id, name, lat, lon, location_name, currency }) => {
+      if (!isValidTenantId(id)) {
+        return {
+          content: [{ type: "text", text: `id inválido: "${id}" — slug minúscula ^[a-z0-9][a-z0-9-]*$ (2-48 chars), inmutable` }],
+          structuredContent: { error: "invalid_tenant_id", id } as unknown as Record<string, unknown>,
+        };
+      }
+      if (!isValidLatLon(lat, lon)) {
+        return {
+          content: [{ type: "text", text: `coordenadas inválidas: lat=${lat}, lon=${lon}` }],
+          structuredContent: { error: "invalid_coordinates", lat, lon } as unknown as Record<string, unknown>,
+        };
+      }
+      const cur = currency ?? "PEN";
+      if (!isValidCurrency(cur)) {
+        return {
+          content: [{ type: "text", text: `moneda inválida: "${cur}" — ISO 4217, 3 letras mayúsculas (ej: PEN, USD)` }],
+          structuredContent: { error: "invalid_currency", currency: cur } as unknown as Record<string, unknown>,
+        };
+      }
+      let tz: string | null = null;
+      try {
+        tz = tzLookup(lat, lon);
+      } catch {
+        // coordenadas en océano o fuera de cobertura — honesto: tz null, el reporte usa UTC
+        tz = null;
+      }
+      const row = await insertTenantDb({ id, name, location_name: location_name ?? null, lat, lon, tz, currency: cur });
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `ya existe una finca con id "${id}" — los ids no se reutilizan` }],
+          structuredContent: { error: "tenant_exists", id } as unknown as Record<string, unknown>,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Finca creada: ${row.id} "${row.name}" tz=${row.tz ?? "desconocida"} currency=${row.currency}\n${summaryText(row)}` }],
+        structuredContent: { tenant: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — update_tenant ----------------------------------------------------------
+  server.registerTool(
+    "update_tenant",
+    {
+      title: "Actualizar finca",
+      description:
+        "Actualiza campos mutables de una finca (name, location_name, lat/lon, currency). El id jamás cambia. Si cambian las coordenadas y no se pasa tz explícita, la zona horaria se re-deriva de las nuevas coordenadas.",
+      inputSchema: {
+        id: z.string().describe("Id de la finca (inmutable)"),
+        name: z.string().min(1).optional(),
+        location_name: z.string().nullable().optional(),
+        lat: z.number().optional(),
+        lon: z.number().optional(),
+        currency: z.string().optional().describe("Moneda ISO 4217"),
+      },
+    },
+    async ({ id, name, location_name, lat, lon, currency }) => {
+      const current = await getTenantDb(id);
+      if (!current) {
+        return {
+          content: [{ type: "text", text: `finca no existe: ${id}` }],
+          structuredContent: { error: "tenant_not_found", id } as unknown as Record<string, unknown>,
+        };
+      }
+      if (currency !== undefined && !isValidCurrency(currency)) {
+        return {
+          content: [{ type: "text", text: `moneda inválida: "${currency}" — ISO 4217, 3 letras mayúsculas` }],
+          structuredContent: { error: "invalid_currency", currency } as unknown as Record<string, unknown>,
+        };
+      }
+      const fields: { name?: string; location_name?: string | null; lat?: number; lon?: number; tz?: string | null; currency?: string } = {};
+      if (name !== undefined) fields.name = name;
+      if (location_name !== undefined) fields.location_name = location_name;
+      if (currency !== undefined) fields.currency = currency;
+      const coordsChanged = lat !== undefined || lon !== undefined;
+      if (coordsChanged) {
+        const newLat = lat ?? current.lat;
+        const newLon = lon ?? current.lon;
+        if (newLat === null || newLon === null || !isValidLatLon(newLat, newLon)) {
+          return {
+            content: [{ type: "text", text: `coordenadas inválidas: lat=${newLat}, lon=${newLon}` }],
+            structuredContent: { error: "invalid_coordinates", lat: newLat, lon: newLon } as unknown as Record<string, unknown>,
+          };
+        }
+        fields.lat = newLat;
+        fields.lon = newLon;
+        try {
+          fields.tz = tzLookup(newLat, newLon);
+        } catch {
+          fields.tz = null;
+        }
+      }
+      const row = await updateTenantDb(id, fields);
+      return {
+        content: [{ type: "text", text: `Finca actualizada: ${row!.id}\n${summaryText(row)}` }],
+        structuredContent: { tenant: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — archive_tenant ---------------------------------------------------------
+  server.registerTool(
+    "archive_tenant",
+    {
+      title: "Archivar finca",
+      description:
+        "Archiva o desarchiva una finca. Archivada sale del selector de la PWA pero su historia completa queda conservada (nada se borra, ADR-0011). Sus módulos/telemetría NO se tocan.",
+      inputSchema: {
+        id: z.string().describe("Id de la finca"),
+        archived: z.boolean().describe("true = archivar, false = desarchivar"),
+      },
+    },
+    async ({ id, archived }) => {
+      const row = await archiveTenantDb(id, archived);
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `finca no existe: ${id}` }],
+          structuredContent: { error: "tenant_not_found", id } as unknown as Record<string, unknown>,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `${archived ? "Finca archivada" : "Finca desarchivada"}: ${row.id} "${row.name}"` }],
+        structuredContent: { tenant: row } as unknown as Record<string, unknown>,
       };
     },
   );

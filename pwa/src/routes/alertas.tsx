@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/sheet.tsx";
 import { remediationFor } from "@/lib/remediation.ts";
 import { formatDateTime, timeAgo } from "@/lib/format.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 
 type AlertRow = {
   time: string; tenant: string; module: string; name: string; severity: string;
@@ -26,10 +27,11 @@ export function AlertasPage() {
   const [tab, setTab] = React.useState<Tab>("open");
   const [selected, setSelected] = React.useState<AlertRow | null>(null);
   const queryClient = useQueryClient();
+  const { active, farmName } = useTenant();
 
   const { data: alerts, isLoading } = useQuery({
-    queryKey: ["alerts.list", tab],
-    queryFn: () => trpc.alerts.list.query({ tenant: "demo", limit: 50, onlyOpen: tab === "open" }),
+    queryKey: ["alerts.list", tab, active],
+    queryFn: () => trpc.alerts.list.query({ tenant: active ?? undefined, limit: 50, onlyOpen: tab === "open" }),
     refetchInterval: 15000
   });
 
@@ -38,7 +40,7 @@ export function AlertasPage() {
     queryKey: ["modules.list"],
     queryFn: () => trpc.modules.list.query()
   });
-  const moduleNames = new Map((modulesList ?? []).map((m) => [m.id, m.name ?? m.id]));
+  const moduleNames = new Map((modulesList ?? []).map((m) => [`${m.tenant}/${m.id}`, m.name ?? m.id]));
 
   const resolveMut = useMutation({
     mutationFn: (a: AlertRow) => {
@@ -93,6 +95,7 @@ export function AlertasPage() {
                 <TableRow>
                   <TableHead>Severidad</TableHead>
                   <TableHead>Alerta</TableHead>
+                  {active === null && <TableHead>Finca</TableHead>}
                   <TableHead>Módulo</TableHead>
                   <TableHead>Dispositivo</TableHead>
                   <TableHead>Cuándo</TableHead>
@@ -113,7 +116,8 @@ export function AlertasPage() {
                         <p className="font-medium">{rem.title}</p>
                         <p className="text-xs text-muted-foreground">{a.name}</p>
                       </TableCell>
-                      <TableCell className="font-mono text-xs" title={a.module}>{moduleNames.get(a.module) ?? a.module}</TableCell>
+                      {active === null && <TableCell className="text-xs">{farmName(a.tenant)}</TableCell>}
+                      <TableCell className="font-mono text-xs" title={a.module}>{moduleNames.get(`${a.tenant}/${a.module}`) ?? a.module}</TableCell>
                       <TableCell className="font-mono text-xs">{a.device ?? "—"}</TableCell>
                       <TableCell className="text-xs text-muted-foreground" title={formatDateTime(a.time)}>{timeAgo(a.time)}</TableCell>
                       <TableCell>

@@ -13,12 +13,19 @@ Dashboard instalable (Vite + React + TanStack Router + tRPC + drizzle-orm + shad
 | `/finanzas` | Mes: ingresos/gastos/balance, gasto por categoría, movimientos (anulados tachados — ADR-0011) | `finance.*` |
 | `/aprobaciones` | Acciones del portero (aprobar/rechazar, ADR-0020) + órdenes de trabajo manuales | `pending.*` |
 | `/camaras` | Última foto por módulo o placeholder honesto | `cameras.lastPhoto` |
-| `/sistema` | Sonda de servicios (broker, DB, portero, MCPs, sim) + identidad de finca + links | `system.services` |
+| `/fincas` | Gestión de fincas: crear (slug inmutable + lat/lon + moneda), editar, archivar (nada se borra) | `tenants.*` → MCP dominio (ADR-0023) |
+| `/sistema` | Sonda de servicios (broker, DB, portero, MCPs, sim) + salud de módulos + links | `system.services` |
+
+## Finca activa (ADR-0023)
+
+Selector en el header: **una finca** filtra todas las páginas; **"Todas las fincas"** agrega con tarjetas/tablas por finca y etiqueta de finca por fila. Regla de oro: jamás sumar monedas distintas — el gasto global multi-moneda es `—` honesto y el desglose va por finca. La selección persiste en `localStorage` (sin auth); si la finca se archiva, vuelve a "Todas" sola. Montos con `formatMoney(amount, currency)` — la moneda es de la finca, no fija.
 
 ## Escrituras (las únicas)
 
 - `pending.decide` / `pending.completeWorkOrder` → portero HTTP con `POLICY_ADMIN_TOKEN` (ADR-0020, cero LLM).
 - `alerts.resolve` → MCP dominio `resolve_alert` (ADR-0021, resolución gobernada en `alert_resolutions`).
+- `modules.create/update/retire/claim` → MCP dominio (ADR-0022, provisionamiento gobernado).
+- `tenants.create/update/archive` → MCP dominio (ADR-0023; validación de slug/moneda en la frontera tRPC).
 
 Todo lo demás es lectura. Nunca publica `cmd/` ni `request/`.
 

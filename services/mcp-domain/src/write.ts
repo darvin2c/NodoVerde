@@ -1,7 +1,8 @@
-// src/write.ts — pool de escritura gobernada (ADR-0021)
+// src/write.ts — pool de escritura gobernada (ADR-0021 + ADR-0022 + ADR-0023)
 // Única excepción al invariante read-only de db.ts.
-// Solo toca campaigns y alert_resolutions con statements explícitos INSERT/UPDATE.
-// Telemetría, tenants, modules, crop_profiles, etc. siguen read-only.
+// Solo toca campaigns, alert_resolutions, modules, device_identities y tenants
+// con statements explícitos INSERT/UPDATE. Telemetría, crop_profiles, etc.
+// siguen read-only. Nada se borra: retiro/archivado = timestamp.
 
 import pg from "pg";
 import crypto from "node:crypto";
@@ -426,4 +427,104 @@ export async function claimDeviceDb(
     [hwId, tenant, moduleId, claimedBy],
   );
   return r.rows.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Tenants (fincas) — gestión gobernada desde PWA (ADR-0023)
+// id = slug elegido por el usuario, INMUTABLE (está gravado en topics MQTT,
+// telemetría histórica, claims y campañas). name/location/lat/lon/currency
+// son mutables. Nada se borra: archivar = archived_at.
+// ---------------------------------------------------------------------------
+
+export type TenantRow = {
+  id: string;
+  name: string;
+  location_name: string | null;
+  lat: number | null;
+  lon: number | null;
+  tz: string | null;
+  currency: string;
+  archived_at: Date | null;
+  created_at: Date;
+};
+
+const TENANT_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+const CURRENCY_RE = /^[A-Z]{3}$/;
+
+/** id de tenant = slug minúscula (ej: "demo", "finca-norte") — visible en topics MQTT. */
+export function isValidTenantId(id: string): boolean {
+  return id.length >= 2 && id.length <= 48 && TENANT_ID_RE.test(id);
+}
+
+/** Moneda ISO 4217 (3 letras mayúsculas). */
+export function isValidCurrency(currency: string): boolean {
+  return CURRENCY_RE.test(currency);
+}
+
+/** Valida coordenadas terrestres (lat/lon obligatorias al crear — ADR-0023). */
+export function isValidLatLon(lat: number, lon: number): boolean {
+  return Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+}
+
+const TENANT_COLS = `id, name, location_name, lat, lon, tz, currency, archived_at, created_at`;
+
+export async function listTenantsDb(includeArchived = false): Promise<TenantRow[]> {
+  const r = await writePool.query(
+    `SELECT ${TENANT_COLS} FROM tenants ${includeArchived ? "" : "WHERE archived_at IS NULL"} ORDER BY id`,
+  );
+  return r.rows as TenantRow[];
+}
+
+export async function getTenantDb(id: string): Promise<TenantRow | null> {
+  const r = await writePool.query(`SELECT ${TENANT_COLS} FROM tenants WHERE id = $1`, [id]);
+  return (r.rows[0] as TenantRow) ?? null;
+}
+
+export async function insertTenantDb(fields: {
+  id: string;
+  name: string;
+  location_name: string | null;
+  lat: number;
+  lon: number;
+  tz: string | null;
+  currency: string;
+}): Promise<TenantRow | null> {
+  const r = await writePool.query(
+    `INSERT INTO tenants (id, name, location_name, lat, lon, tz, currency)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING ${TENANT_COLS}`,
+    [fields.id, fields.name, fields.location_name, fields.lat, fields.lon, fields.tz, fields.currency],
+  );
+  return (r.rows[0] as TenantRow) ?? null;
+}
+
+/** Actualiza campos mutables de la finca. El id jamás se toca. */
+export async function updateTenantDb(
+  id: string,
+  fields: { name?: string; location_name?: string | null; lat?: number; lon?: number; tz?: string | null; currency?: string },
+): Promise<TenantRow | null> {
+  const sets: string[] = [];
+  const params: unknown[] = [id];
+  for (const key of ["name", "location_name", "lat", "lon", "tz", "currency"] as const) {
+    if (fields[key] !== undefined) {
+      params.push(fields[key]);
+      sets.push(`${key} = $${params.length}`);
+    }
+  }
+  if (sets.length === 0) return getTenantDb(id);
+  const r = await writePool.query(
+    `UPDATE tenants SET ${sets.join(", ")} WHERE id = $1 RETURNING ${TENANT_COLS}`,
+    params,
+  );
+  return (r.rows[0] as TenantRow) ?? null;
+}
+
+/** Archiva (archived=true) o desarchiva (archived=false). Historia conservada — nada se borra. */
+export async function archiveTenantDb(id: string, archived: boolean): Promise<TenantRow | null> {
+  const r = await writePool.query(
+    `UPDATE tenants SET archived_at = ${archived ? "now()" : "NULL"} WHERE id = $1 RETURNING ${TENANT_COLS}`,
+    [id],
+  );
+  return (r.rows[0] as TenantRow) ?? null;
 }

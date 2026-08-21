@@ -1,11 +1,17 @@
 // Formatos compartidos de la UI (es-PE). Contrato durable: todas las páginas usan estos.
 
-const pen = new Intl.NumberFormat("es-PE", { style: "currency", currency: "PEN" });
 const dt = new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short" });
 const dtShort = new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
-export function formatPEN(amount: number): string {
-  return pen.format(amount);
+// Moneda por finca (ADR-0023): cache de formateadores, fallback a PEN
+const moneyCache = new Map<string, Intl.NumberFormat>();
+export function formatMoney(amount: number, currency = "PEN"): string {
+  let f = moneyCache.get(currency);
+  if (!f) {
+    f = new Intl.NumberFormat("es-PE", { style: "currency", currency });
+    moneyCache.set(currency, f);
+  }
+  return f.format(amount);
 }
 
 export function formatDateTime(iso: string | number | Date): string {

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  LayoutDashboard, Boxes, TriangleAlert, Wallet, CheckSquare, Camera, Activity
+  LayoutDashboard, Boxes, TriangleAlert, Wallet, CheckSquare, Camera, Activity, MapPinned
 } from "lucide-react";
 import {
   CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList
@@ -14,6 +14,7 @@ const DESTINATIONS = [
   { to: "/aprobaciones", label: "Aprobaciones", icon: CheckSquare, keywords: "portero pendientes aprobar" },
   { to: "/finanzas", label: "Finanzas", icon: Wallet, keywords: "dinero gastos movimientos" },
   { to: "/camaras", label: "Cámaras", icon: Camera, keywords: "fotos camaras" },
+  { to: "/fincas", label: "Fincas", icon: MapPinned, keywords: "fincas tenants granja" },
   { to: "/sistema", label: "Sistema", icon: Activity, keywords: "servicios salud broker" }
 ] as const;
 

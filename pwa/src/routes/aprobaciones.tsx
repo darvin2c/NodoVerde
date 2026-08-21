@@ -6,21 +6,23 @@ import { Badge } from "@/components/ui/badge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { formatDateTime } from "@/lib/format.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 
 // Aprobaciones del portero (ADR-0020: botón PWA con POLICY_ADMIN_TOKEN — cero LLM en este canal)
 // + órdenes de trabajo manuales (podar, mezclar nutrientes…).
 
 export function AprobacionesPage() {
   const queryClient = useQueryClient();
+  const { active, farmName } = useTenant();
 
   const { data: approvals, isLoading, error } = useQuery({
-    queryKey: ["pending.approvals", "demo"],
-    queryFn: () => trpc.pending.approvals.query({ tenant: "demo" }),
+    queryKey: ["pending.approvals", active],
+    queryFn: () => trpc.pending.approvals.query(active ? { tenant: active } : undefined),
     refetchInterval: 10000
   });
   const { data: orders } = useQuery({
-    queryKey: ["pending.workOrders", "demo"],
-    queryFn: () => trpc.pending.workOrders.query({ tenant: "demo", status: "pending" }),
+    queryKey: ["pending.workOrders", active],
+    queryFn: () => trpc.pending.workOrders.query({ tenant: active ?? undefined, status: "pending" }),
     refetchInterval: 15000
   });
 
@@ -84,6 +86,7 @@ export function AprobacionesPage() {
                     <span className="font-medium">
                       {device} <span className="text-xs text-muted-foreground">· {action}</span>
                       {module && <span className="text-xs text-muted-foreground"> · {module}</span>}
+                      {active === null && a.tenant ? <span className="text-xs text-muted-foreground"> · {farmName(String(a.tenant))}</span> : null}
                     </span>
                     <Badge variant="secondary">{String(a.status ?? "pending")}</Badge>
                   </div>
@@ -122,7 +125,10 @@ export function AprobacionesPage() {
               return (
                 <div key={id} className="rounded-lg border p-4 space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="font-medium">{kind}</span>
+                    <span className="font-medium">
+                      {kind}
+                      {active === null && o.tenant ? <span className="text-xs text-muted-foreground"> · {farmName(String(o.tenant))}</span> : null}
+                    </span>
                     {created ? <span className="text-xs text-muted-foreground">{formatDateTime(String(created))}</span> : null}
                   </div>
                   <p className="text-sm text-muted-foreground">{instructions}</p>

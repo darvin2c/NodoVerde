@@ -4,11 +4,13 @@ import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { formatDateTime, timeAgo } from "@/lib/format.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 
 export function CamarasPage() {
+  const { active, farmName } = useTenant();
   const { data } = useQuery({
-    queryKey: ["cameras.lastPhoto"],
-    queryFn: () => trpc.cameras.lastPhoto.query({ tenant: "demo" }),
+    queryKey: ["cameras.lastPhoto", active],
+    queryFn: () => trpc.cameras.lastPhoto.query(active ? { tenant: active } : undefined),
     refetchInterval: 30000
   });
   const { data: mods } = useQuery({
@@ -16,8 +18,9 @@ export function CamarasPage() {
     queryFn: () => trpc.modules.list.query()
   });
 
-  const photoByModule: Record<string, { module: string; device: string; time: string }> = {};
-  for (const p of data ?? []) photoByModule[p.module] = p;
+  const visibles = (mods ?? []).filter((m) => active === null || m.tenant === active);
+  const photoByModule: Record<string, { tenant: string; module: string; device: string; time: string }> = {};
+  for (const p of data ?? []) photoByModule[`${p.tenant}/${p.module}`] = p;
 
   return (
     <div className="space-y-6">
@@ -29,10 +32,10 @@ export function CamarasPage() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {(mods ?? []).map((m) => {
-          const photo = photoByModule[m.id];
+        {visibles.map((m) => {
+          const photo = photoByModule[`${m.tenant}/${m.id}`];
           return (
-            <Card key={m.id}>
+            <Card key={`${m.tenant}/${m.id}`}>
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-base">{m.id}</CardTitle>
@@ -40,7 +43,7 @@ export function CamarasPage() {
                     ? <Badge variant="success">con foto</Badge>
                     : <Badge variant="secondary">sin foto</Badge>}
                 </div>
-                <CardDescription>{m.crop}</CardDescription>
+                <CardDescription>{active === null ? `${farmName(m.tenant)} · ` : ""}{m.crop}</CardDescription>
               </CardHeader>
               <CardContent>
                 {photo ? (

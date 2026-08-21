@@ -7,7 +7,7 @@ import { getDb, type TerraDb } from "./db.js";
 import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
-import { resolveAlert, createModule, updateModule, retireModule, claimDevice } from "./mcpDomain.js";
+import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant } from "./mcpDomain.js";
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -15,8 +15,6 @@ export type TrpcContext = {
 };
 
 const t = initTRPC.context<TrpcContext>().create({ transformer: superjson });
-
-type FarmStatus = { tenant: string; name: string; location_name: string | null; tz: string | null };
 
 // Frontera cruda a drizzle: las queries usan sql`` crudo; el pool devuelve { rows }.
 // Cast centralizado aquí (una vez), no inline en cada procedure.
@@ -49,21 +47,12 @@ export const appRouter = t.router({
         }
       } catch { /* */ }
 
-      // Identidad de la finca desde DB (tenants — única fuente de verdad; la PWA tampoco hardcodea lugar)
-      let farm: FarmStatus | null = null;
-      try {
-        const res = await rawDb(ctx.db).execute(
-          sql`SELECT id AS tenant, name, location_name, tz FROM tenants ORDER BY id LIMIT 1`
-        );
-        farm = (res.rows[0] as FarmStatus | undefined) ?? null;
-      } catch {
-        // sin tenants legible: null honesto
-      }
+      // La identidad de la finca NO vive aquí: plataforma ≠ finca (ADR-0023).
+      // El tenant activo lo elige el usuario en el selector del header.
 
       return {
         broker: mqttOk ? "connected" as const : "disconnected" as const,
         db: dbOk ? "ok" as const : "error" as const,
-        farm,
         lastTelemetry,
         healthSummary,
         ts: Date.now()
@@ -107,6 +96,111 @@ export const appRouter = t.router({
       };
     })
   }),
+  // ── TENANTS (fincas): gestión gobernada vía MCP dominio (ADR-0023) ──
+  // ── TENANTS (fincas): gestión gobernada vía MCP dominio (ADR-0023) ──
+  // Validación espejo del dominio en la frontera: un id/moneda inválido nunca llega al MCP.
+  tenants: t.router({
+    list: t.procedure
+      .input(z.object({ includeArchived: z.boolean().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        try {
+          const res = await rawDb(ctx.db).execute(
+            sql`SELECT id, name, location_name, lat, lon, tz, currency, archived_at, created_at
+                FROM tenants ${input?.includeArchived ? sql`` : sql`WHERE archived_at IS NULL`} ORDER BY id`
+          );
+          return res.rows as Array<{
+            id: string; name: string; location_name: string | null;
+            lat: number | null; lon: number | null; tz: string | null;
+            currency: string; archived_at: string | null; created_at: string;
+          }>;
+        } catch {
+          return [];
+        }
+      }),
+
+    create: t.procedure
+      .input(z.object({
+        id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,31}$/, "slug: minúsculas, dígitos y guiones, 2-32 chars"),
+        name: z.string().min(1),
+        lat: z.number().min(-90).max(90),
+        lon: z.number().min(-180).max(180),
+        location_name: z.string().optional(),
+        currency: z.enum(["PEN", "USD", "EUR"]).optional()
+      }))
+      .mutation(async ({ input }) => createTenant(input)),
+
+    update: t.procedure
+      .input(z.object({
+        id: z.string().min(1),
+        name: z.string().min(1).optional(),
+        location_name: z.string().nullable().optional(),
+        lat: z.number().min(-90).max(90).optional(),
+        lon: z.number().min(-180).max(180).optional(),
+        currency: z.enum(["PEN", "USD", "EUR"]).optional()
+      }))
+      .mutation(async ({ input }) => updateTenant(input)),
+
+    archive: t.procedure
+      .input(z.object({ id: z.string().min(1), archived: z.boolean() }))
+      .mutation(async ({ input }) => archiveTenant(input))
+  }),
+
+  // ── FARMS: resumen agregado multi-finca para el Overview en modo "Todas" (ADR-0023) ──
+  farms: t.router({
+    summary: t.procedure.query(async ({ ctx }) => {
+      const db = rawDb(ctx.db);
+      let rows: Array<{
+        id: string; name: string; location_name: string | null; currency: string;
+        total_modules: number; open_warn: number; open_critical: number; today_spend: string;
+      }> = [];
+      try {
+        const res = await db.execute(sql`
+          SELECT t.id, t.name, t.location_name, t.currency,
+            (SELECT count(*)::int FROM modules m WHERE m.tenant = t.id AND m.retired_at IS NULL) AS total_modules,
+            (SELECT count(*)::int FROM alerts a WHERE a.tenant = t.id AND a.severity = 'warn'
+               AND a.time > now() - interval '24 hours'
+               AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
+               AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
+                  AND (r.module IS NULL OR r.module = a.module)
+                  AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))) AS open_warn,
+            (SELECT count(*)::int FROM alerts a WHERE a.tenant = t.id AND a.severity = 'critical'
+               AND a.time > now() - interval '24 hours'
+               AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
+               AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
+                  AND (r.module IS NULL OR r.module = a.module)
+                  AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))) AS open_critical,
+            (SELECT COALESCE(SUM(amount), 0) FROM movements mv WHERE mv.tenant = t.id AND mv.kind = 'gasto'
+               AND ts::date = now()::date AND voided_by IS NULL AND anula_a IS NULL) AS today_spend
+          FROM tenants t WHERE t.archived_at IS NULL ORDER BY t.id
+        `);
+        rows = res.rows as typeof rows;
+      } catch { /* lista vacía = honesto */ }
+
+      // Confianza media por finca (vivo vía MQTT)
+      const confByTenant = new Map<string, { sum: number; n: number }>();
+      for (const [key, c] of mqttBus.getLastConfidence()) {
+        const tenant = key.split("/")[0];
+        const acc = confByTenant.get(tenant) ?? { sum: 0, n: 0 };
+        acc.sum += c.v; acc.n += 1;
+        confByTenant.set(tenant, acc);
+      }
+
+      return rows.map((r) => {
+        const conf = confByTenant.get(r.id);
+        return {
+          id: r.id,
+          name: r.name,
+          locationName: r.location_name,
+          currency: r.currency,
+          totalModules: r.total_modules,
+          openAlerts: { warn: r.open_warn, critical: r.open_critical },
+          todaySpend: Number(r.today_spend),
+          avgConfidence: conf && conf.n > 0 ? conf.sum / conf.n : null
+        };
+      });
+    })
+  }),
+
   // ── MÓDULOS ──
   modules: t.router({
     list: t.procedure.query(async ({ ctx }) => {
@@ -176,29 +270,38 @@ export const appRouter = t.router({
       }),
 
     // Detalle de un módulo: ficha + perfil de cultivo + últimas lecturas + alertas recientes del módulo
+    // tenant opcional (ADR-0023): si se omite busca en todas las fincas; ambiguo (mismo id en 2 fincas) → error
     detail: t.procedure
-      .input(z.object({ tenant: z.string().default("demo"), id: z.string().min(1) }))
+      .input(z.object({ tenant: z.string().optional(), id: z.string().min(1) }))
       .query(async ({ ctx, input }) => {
         const db = rawDb(ctx.db);
         try {
           const modRes = await db.execute(
             sql`SELECT m.tenant, m.id, m.name, m.crop, m.retired_at, m.created_at, c.ec_min, c.ec_max, c.ph_min, c.ph_max, c.water_temp_min, c.water_temp_max, c.notes AS crop_notes
                 FROM modules m LEFT JOIN crop_profiles c ON c.name = m.crop
-                WHERE m.tenant = ${input.tenant} AND m.id = ${input.id}`
+                WHERE (${input.tenant ?? null}::text IS NULL OR m.tenant = ${input.tenant ?? null}) AND m.id = ${input.id}
+                ORDER BY m.tenant LIMIT 2`
           );
+          if (modRes.rows.length > 1) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `módulo ambiguo: "${input.id}" existe en varias fincas — selecciona una finca`
+            });
+          }
           const module = (modRes.rows[0] as Record<string, unknown> | undefined) ?? null;
           if (!module) return null;
+          const tenant = module.tenant as string;
 
           // Fierro vinculado (claiming ADR-0015) — null honesto si el módulo no tiene hardware
           const hwRes = await db.execute(
             sql`SELECT hw_id, claimed_by, claimed_at FROM device_identities
-                WHERE tenant = ${input.tenant} AND module = ${input.id} LIMIT 1`
+                WHERE tenant = ${tenant} AND module = ${input.id} LIMIT 1`
           );
           const hardware = (hwRes.rows[0] as { hw_id: string; claimed_by: string | null; claimed_at: string } | undefined) ?? null;
 
           const readingsRes = await db.execute(
             sql`SELECT DISTINCT ON (metric) device, metric, value, time
-                FROM telemetry WHERE tenant = ${input.tenant} AND module = ${input.id}
+                FROM telemetry WHERE tenant = ${tenant} AND module = ${input.id}
                 ORDER BY metric, time DESC`
           );
 
@@ -213,11 +316,11 @@ export const appRouter = t.router({
                            AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint'))
                        ) THEN false
                        ELSE true END AS open
-                FROM alerts a WHERE a.tenant = ${input.tenant} AND a.module = ${input.id}
+                FROM alerts a WHERE a.tenant = ${tenant} AND a.module = ${input.id}
                 ORDER BY a.time DESC LIMIT 10`
           );
 
-          const key = `${input.tenant}/${input.id}`;
+          const key = `${tenant}/${input.id}`;
           const confidence = mqttBus.getLastConfidence().get(key) ?? null;
           const health = mqttBus.getLastHealth().get(key) ?? null;
 
@@ -258,20 +361,22 @@ export const appRouter = t.router({
   // ── CAMPO: última lectura por módulo ──
   field: t.router({
     latest: t.procedure
-      .input(z.object({ tenant: z.string().optional().default("demo") }).optional())
+      .input(z.object({ tenant: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         try {
           const res = await rawDb(ctx.db).execute(
-            sql`SELECT DISTINCT ON (module, metric) module, device, metric, value, time
-                FROM telemetry WHERE tenant = ${tenant}
-                ORDER BY module, metric, time DESC`
+            sql`SELECT DISTINCT ON (tenant, module, metric) tenant, module, device, metric, value, time
+                FROM telemetry
+                WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null})
+                ORDER BY tenant, module, metric, time DESC`
           );
-          // Agrupar por módulo
+          // Agrupar por finca/módulo (la clave compuesta evita mezclar mod-1 de dos fincas — ADR-0023)
           const byModule: Record<string, Record<string, { value: number | null; time: string; device: string }>> = {};
-          for (const r of res.rows as Array<{ module: string; device: string; metric: string; value: number | null; time: string }>) {
-            if (!byModule[r.module]) byModule[r.module] = {};
-            byModule[r.module][r.metric] = { value: r.value, time: r.time, device: r.device };
+          for (const r of res.rows as Array<{ tenant: string; module: string; device: string; metric: string; value: number | null; time: string }>) {
+            const key = `${r.tenant}/${r.module}`;
+            if (!byModule[key]) byModule[key] = {};
+            byModule[key][r.metric] = { value: r.value, time: r.time, device: r.device };
           }
           return byModule;
         } catch {
@@ -308,48 +413,62 @@ export const appRouter = t.router({
   // ── FINANZAS: resumen del mes desde movements (SUM en SQL) ──
   finance: t.router({
     monthSummary: t.procedure
-      .input(z.object({ tenant: z.string().optional().default("demo"), month: z.string().optional() }).optional())
+      .input(z.object({ tenant: z.string().optional(), month: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         // month = YYYY-MM, default mes actual UTC
         const month = input?.month ?? new Date().toISOString().slice(0, 7);
         try {
+          // Sin tenant → una fila por finca (modo "Todas", ADR-0023). Nunca se suman monedas distintas.
           const res = await rawDb(ctx.db).execute(
-            sql`SELECT
-                  COALESCE(SUM(CASE WHEN kind = 'ingreso' THEN amount ELSE 0 END), 0) as ingresos,
-                  COALESCE(SUM(CASE WHEN kind = 'gasto' THEN amount ELSE 0 END), 0) as gastos,
+            sql`SELECT m.tenant, t.currency,
+                  COALESCE(SUM(CASE WHEN m.kind = 'ingreso' THEN m.amount ELSE 0 END), 0) as ingresos,
+                  COALESCE(SUM(CASE WHEN m.kind = 'gasto' THEN m.amount ELSE 0 END), 0) as gastos,
                   COUNT(*)::int as count
-                FROM movements
-                WHERE tenant = ${tenant}
-                  AND to_char(ts, 'YYYY-MM') = ${month}
-                  AND voided_by IS NULL AND anula_a IS NULL`
+                FROM movements m
+                LEFT JOIN tenants t ON t.id = m.tenant
+                WHERE (${tenant ?? null}::text IS NULL OR m.tenant = ${tenant ?? null})
+                  AND to_char(m.ts, 'YYYY-MM') = ${month}
+                  AND m.voided_by IS NULL AND m.anula_a IS NULL
+                GROUP BY m.tenant, t.currency ORDER BY m.tenant`
           );
-          const row = res.rows[0] as { ingresos: string; gastos: string; count: number } | undefined;
-          const ingresos = Number(row?.ingresos ?? 0);
-          const gastos = Number(row?.gastos ?? 0);
-          const balance = ingresos - gastos;
-          const empty = (row?.count ?? 0) === 0;
-          return { month, ingresos, gastos, balance, count: row?.count ?? 0, empty };
+          const byTenant = (res.rows as Array<{ tenant: string; currency: string | null; ingresos: string; gastos: string; count: number }>).map((row) => {
+            const ingresos = Number(row.ingresos);
+            const gastos = Number(row.gastos);
+            return { tenant: row.tenant, currency: row.currency ?? "PEN", ingresos, gastos, balance: ingresos - gastos, count: row.count };
+          });
+          // Compat: con tenant seleccionado devuelve también el agregado plano
+          const mine = tenant ? byTenant.find((r) => r.tenant === tenant) : undefined;
+          return {
+            month,
+            ingresos: mine?.ingresos ?? 0,
+            gastos: mine?.gastos ?? 0,
+            balance: mine?.balance ?? 0,
+            count: mine?.count ?? 0,
+            empty: tenant ? (mine?.count ?? 0) === 0 : byTenant.length === 0,
+            byTenant
+          };
         } catch {
-          return { month, ingresos: 0, gastos: 0, balance: 0, count: 0, empty: true };
+          return { month, ingresos: 0, gastos: 0, balance: 0, count: 0, empty: true, byTenant: [] };
         }
       }),
 
     // Movimientos recientes (historia inmutable: incluye anulados, se muestran como tales)
     recentMovements: t.procedure
-      .input(z.object({ tenant: z.string().default("demo"), limit: z.number().min(1).max(100).default(30) }).optional())
+      .input(z.object({ tenant: z.string().optional(), limit: z.number().min(1).max(100).default(30) }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         const limit = input?.limit ?? 30;
         try {
           const res = await rawDb(ctx.db).execute(
-            sql`SELECT id, ts, kind, amount, currency, category, note, attribution,
+            sql`SELECT id, tenant, ts, kind, amount, currency, category, note, attribution,
                        voided_by, anula_a, source, created_by
-                FROM movements WHERE tenant = ${tenant}
+                FROM movements
+                WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null})
                 ORDER BY ts DESC LIMIT ${limit}`
           );
           return res.rows as Array<{
-            id: string; ts: string; kind: string; amount: string; currency: string;
+            id: string; tenant: string; ts: string; kind: string; amount: string; currency: string;
             category: string; note: string | null; attribution: unknown;
             voided_by: string | null; anula_a: string | null;
             source: string | null; created_by: string | null;
@@ -361,20 +480,23 @@ export const appRouter = t.router({
 
     // Gasto por categoría del mes (SUM en SQL — ADR-0011: cero aritmética en render)
     byCategory: t.procedure
-      .input(z.object({ tenant: z.string().default("demo"), month: z.string().optional() }).optional())
+      .input(z.object({ tenant: z.string().optional(), month: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         const month = input?.month ?? new Date().toISOString().slice(0, 7);
         try {
           const res = await rawDb(ctx.db).execute(
-            sql`SELECT category, COALESCE(SUM(amount), 0) AS total
-                FROM movements
-                WHERE tenant = ${tenant} AND kind = 'gasto'
-                  AND to_char(ts, 'YYYY-MM') = ${month}
-                  AND voided_by IS NULL AND anula_a IS NULL
-                GROUP BY category ORDER BY total DESC`
+            sql`SELECT m.tenant, m.category, t.currency, COALESCE(SUM(m.amount), 0) AS total
+                FROM movements m
+                LEFT JOIN tenants t ON t.id = m.tenant
+                WHERE (${tenant ?? null}::text IS NULL OR m.tenant = ${tenant ?? null})
+                  AND m.kind = 'gasto'
+                  AND to_char(m.ts, 'YYYY-MM') = ${month}
+                  AND m.voided_by IS NULL AND m.anula_a IS NULL
+                GROUP BY m.tenant, m.category, t.currency ORDER BY m.tenant, total DESC`
           );
-          return (res.rows as Array<{ category: string; total: string }>).map((r) => ({ category: r.category, total: Number(r.total) }));
+          return (res.rows as Array<{ tenant: string; category: string; currency: string | null; total: string }>)
+            .map((r) => ({ tenant: r.tenant, category: r.category, currency: r.currency ?? "PEN", total: Number(r.total) }));
         } catch {
           return [];
         }
@@ -384,14 +506,16 @@ export const appRouter = t.router({
   // ── PENDIENTES: alertas recientes + aprobaciones y órdenes (Fase 3) ──
   pending: t.router({
     alerts: t.procedure
-      .input(z.object({ tenant: z.string().optional().default("demo"), limit: z.number().min(1).max(50).optional().default(10) }).optional())
+      .input(z.object({ tenant: z.string().optional(), limit: z.number().min(1).max(50).optional().default(10) }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         const limit = input?.limit ?? 10;
         try {
           const res = await rawDb(ctx.db).execute(
             sql`SELECT time, tenant, module, name, severity, device, detail
-                FROM alerts WHERE tenant = ${tenant} AND severity IN ('warn','critical')
+                FROM alerts
+                WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null})
+                  AND severity IN ('warn','critical')
                 ORDER BY time DESC LIMIT ${limit}`
           );
           return res.rows as Array<{ time: string; tenant: string; module: string; name: string; severity: string; device: string | null; detail: unknown }>;
@@ -401,20 +525,25 @@ export const appRouter = t.router({
       }),
 
     approvals: t.procedure
-      .input(z.object({ tenant: z.string().optional().default("demo") }).optional())
-      .query(async ({ input }) => {
-        const tenant = input?.tenant ?? "demo";
-        try {
-          const data = await fetchJson<{ actions: unknown[] } | unknown[]>("/api/approvals", { params: { tenant } });
-          if (Array.isArray(data)) return data as unknown as unknown[];
-          if (data && typeof data === "object" && "actions" in (data as Record<string, unknown>)) {
-            return (data as { actions: unknown[] }).actions;
+      .input(z.object({ tenant: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        // Sin tenant → todas las fincas activas (ADR-0023): el portero exige tenant por llamada
+        const tenants = input?.tenant ? [input.tenant] : await activeTenantIds(ctx.db);
+        const all: unknown[] = [];
+        for (const tenant of tenants) {
+          try {
+            const data = await fetchJson<{ actions: unknown[] } | unknown[]>("/api/approvals", { params: { tenant } });
+            const actions = Array.isArray(data) ? data : (data?.actions ?? []);
+            for (const a of actions as Array<Record<string, unknown>>) all.push({ ...a, tenant: a.tenant ?? tenant });
+          } catch (err) {
+            // Con tenant explícito el error sí propaga (lo ve el usuario); en modo Todas se omite la finca caída
+            if (input?.tenant) {
+              const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+            }
           }
-          return data as unknown as unknown[];
-        } catch (err) {
-          const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
-          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
         }
+        return all;
       }),
 
     decide: t.procedure
@@ -436,23 +565,26 @@ export const appRouter = t.router({
       }),
 
     workOrders: t.procedure
-      .input(z.object({ tenant: z.string().optional().default("demo"), status: z.enum(["pending", "done", "cancelled"]).optional() }).optional())
-      .query(async ({ input }) => {
-        const tenant = input?.tenant ?? "demo";
+      .input(z.object({ tenant: z.string().optional(), status: z.enum(["pending", "done", "cancelled"]).optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const tenants = input?.tenant ? [input.tenant] : await activeTenantIds(ctx.db);
         const status = input?.status;
-        try {
-          const data = await fetchJson<{ orders: unknown[] } | unknown[]>("/api/work-orders", {
-            params: { tenant, status },
-          });
-          if (Array.isArray(data)) return data as unknown as unknown[];
-          if (data && typeof data === "object" && "orders" in (data as Record<string, unknown>)) {
-            return (data as { orders: unknown[] }).orders;
+        const all: unknown[] = [];
+        for (const tenant of tenants) {
+          try {
+            const data = await fetchJson<{ orders: unknown[] } | unknown[]>("/api/work-orders", {
+              params: { tenant, status },
+            });
+            const orders = Array.isArray(data) ? data : (data?.orders ?? []);
+            for (const o of orders as Array<Record<string, unknown>>) all.push({ ...o, tenant: o.tenant ?? tenant });
+          } catch (err) {
+            if (input?.tenant) {
+              const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
+            }
           }
-          return data as unknown as unknown[];
-        } catch (err) {
-          const msg = err instanceof PolicyError ? err.message : err instanceof Error ? err.message : String(err);
-          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: msg });
         }
+        return all;
       }),
 
     completeWorkOrder: t.procedure
@@ -473,49 +605,53 @@ export const appRouter = t.router({
   // ── OVERVIEW: KPIs de portada ──
   overview: t.router({
     kpis: t.procedure
-      .input(z.object({ tenant: z.string().default("demo") }).optional())
+      .input(z.object({ tenant: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant; // undefined = todas las fincas (ADR-0023)
 
         // Módulos por estado (health vivo vía MQTT) + total registrado en DB
         const byState: Record<string, number> = {};
         for (const [key, h] of mqttBus.getLastHealth()) {
-          if (!key.startsWith(`${tenant}/`)) continue;
+          if (tenant && !key.startsWith(`${tenant}/`)) continue;
           byState[h.state] = (byState[h.state] ?? 0) + 1;
         }
         let totalModules = 0;
         let openAlerts = { warn: 0, critical: 0 };
-        let todaySpend = 0;
+        let todaySpend: number | null = tenant ? 0 : null;
         let campaign: { id: string; crop: string; opened_at: string } | null = null;
         let lastTelemetry: string | null = null;
         try {
           const res = await rawDb(ctx.db).execute(sql`
             SELECT
-              (SELECT count(*)::int FROM modules WHERE tenant = ${tenant}) AS total_modules,
-              (SELECT count(*)::int FROM alerts a WHERE a.tenant = ${tenant} AND a.severity = 'warn'
+              (SELECT count(*)::int FROM modules m WHERE (${tenant ?? null}::text IS NULL OR m.tenant = ${tenant ?? null}) AND m.retired_at IS NULL) AS total_modules,
+              (SELECT count(*)::int FROM alerts a WHERE (${tenant ?? null}::text IS NULL OR a.tenant = ${tenant ?? null}) AND a.severity = 'warn'
                  AND a.time > now() - interval '24 hours'
                  AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
                  AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
                     AND (r.module IS NULL OR r.module = a.module)
                     AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))) AS open_warn,
-              (SELECT count(*)::int FROM alerts a WHERE a.tenant = ${tenant} AND a.severity = 'critical'
+              (SELECT count(*)::int FROM alerts a WHERE (${tenant ?? null}::text IS NULL OR a.tenant = ${tenant ?? null}) AND a.severity = 'critical'
                  AND a.time > now() - interval '24 hours'
                  AND COALESCE(a.detail::jsonb ->> 'state', 'pending') <> 'resolved'
                  AND NOT EXISTS (SELECT 1 FROM alert_resolutions r WHERE r.tenant = a.tenant AND r.alert_name = a.name
                     AND (r.module IS NULL OR r.module = a.module)
                     AND (r.fingerprint IS NULL OR r.fingerprint = (a.detail::jsonb ->> 'fingerprint')))) AS open_critical,
-              (SELECT COALESCE(SUM(amount), 0) FROM movements WHERE tenant = ${tenant} AND kind = 'gasto'
+              (SELECT COALESCE(SUM(amount), 0) FROM movements mv WHERE (${tenant ?? null}::text IS NULL OR mv.tenant = ${tenant ?? null}) AND mv.kind = 'gasto'
                  AND ts::date = now()::date AND voided_by IS NULL AND anula_a IS NULL) AS today_spend,
-              (SELECT max(time) FROM telemetry WHERE tenant = ${tenant}) AS last_telemetry
+              (SELECT max(time) FROM telemetry tl WHERE (${tenant ?? null}::text IS NULL OR tl.tenant = ${tenant ?? null})) AS last_telemetry
           `);
           const row = res.rows[0] as Record<string, unknown> | undefined;
           totalModules = Number(row?.total_modules ?? 0);
           openAlerts = { warn: Number(row?.open_warn ?? 0), critical: Number(row?.open_critical ?? 0) };
-          todaySpend = Number(row?.today_spend ?? 0);
+          // Modo Todas: sumar gastos mezclaría monedas (PEN+USD) — null honesto, el desglose vive en farms.summary
+          todaySpend = tenant ? Number(row?.today_spend ?? 0) : null;
           lastTelemetry = (row?.last_telemetry as string | null) ?? null;
 
+          // Campaña abierta: solo tiene sentido por finca; en modo Todas se reporta la primera (informativo)
           const campRes = await rawDb(ctx.db).execute(
-            sql`SELECT id, crop, opened_at FROM campaigns WHERE tenant = ${tenant} AND state = 'open' LIMIT 1`
+            sql`SELECT id, tenant, crop, opened_at FROM campaigns
+                WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null}) AND state = 'open'
+                ORDER BY opened_at LIMIT 1`
           );
           campaign = (campRes.rows[0] as { id: string; crop: string; opened_at: string } | undefined) ?? null;
         } catch { /* KPIs a cero = honesto */ }
@@ -524,7 +660,7 @@ export const appRouter = t.router({
         let confidenceSum = 0;
         let confidenceN = 0;
         for (const [key, c] of mqttBus.getLastConfidence()) {
-          if (!key.startsWith(`${tenant}/`)) continue;
+          if (tenant && !key.startsWith(`${tenant}/`)) continue;
           confidenceSum += c.v;
           confidenceN += 1;
         }
@@ -532,8 +668,11 @@ export const appRouter = t.router({
         let pendingApprovals = 0;
         let policyReachable = true;
         try {
-          const data = await fetchJson<{ actions?: unknown[] } | unknown[]>("/api/approvals", { params: { tenant } });
-          pendingApprovals = Array.isArray(data) ? data.length : (data.actions?.length ?? 0);
+          const tenants = tenant ? [tenant] : await activeTenantIds(ctx.db);
+          for (const tId of tenants) {
+            const data = await fetchJson<{ actions?: unknown[] } | unknown[]>("/api/approvals", { params: { tenant: tId } });
+            pendingApprovals += Array.isArray(data) ? data.length : (data.actions?.length ?? 0);
+          }
         } catch {
           policyReachable = false;
         }
@@ -556,13 +695,13 @@ export const appRouter = t.router({
   alerts: t.router({
     list: t.procedure
       .input(z.object({
-        tenant: z.string().default("demo"),
+        tenant: z.string().optional(),
         limit: z.number().min(1).max(100).default(50),
         severity: z.enum(["info", "warn", "critical"]).optional(),
         onlyOpen: z.boolean().default(false)
       }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         const limit = input?.limit ?? 50;
         try {
           const res = await rawDb(ctx.db).execute(sql`
@@ -578,7 +717,7 @@ export const appRouter = t.router({
                      ) THEN false
                      ELSE true END AS open
               FROM alerts a
-              WHERE a.tenant = ${tenant}
+              WHERE (${tenant ?? null}::text IS NULL OR a.tenant = ${tenant ?? null})
                 AND (${input?.severity ?? null}::text IS NULL OR a.severity = ${input?.severity ?? null})
               ORDER BY a.time DESC LIMIT 500
             ) q
@@ -631,16 +770,17 @@ export const appRouter = t.router({
   // ── CÁMARAS: último evento photo por módulo ──
   cameras: t.router({
     lastPhoto: t.procedure
-      .input(z.object({ tenant: z.string().optional().default("demo") }).optional())
+      .input(z.object({ tenant: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant ?? "demo";
+        const tenant = input?.tenant;
         try {
           const res = await rawDb(ctx.db).execute(
-            sql`SELECT DISTINCT ON (module) module, device, metric, value, time, raw
-                FROM telemetry WHERE tenant = ${tenant} AND metric = 'photo'
-                ORDER BY module, time DESC`
+            sql`SELECT DISTINCT ON (tenant, module) tenant, module, device, metric, value, time, raw
+                FROM telemetry
+                WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null}) AND metric = 'photo'
+                ORDER BY tenant, module, time DESC`
           );
-          const rows = res.rows as Array<{ module: string; device: string; time: string; raw: unknown }>;
+          const rows = res.rows as Array<{ tenant: string; module: string; device: string; time: string; raw: unknown }>;
           // Si no hay fotos, devolver vacío honesto
           if (rows.length === 0) return [];
           return rows;
@@ -662,5 +802,15 @@ async function checkDb(db: TerraDb): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Fincas activas (no archivadas) — para fan-out multi-finca cuando el tenant se omite (ADR-0023). */
+async function activeTenantIds(db: TerraDb): Promise<string[]> {
+  try {
+    const res = await rawDb(db).execute(sql`SELECT id FROM tenants WHERE archived_at IS NULL ORDER BY id`);
+    return (res.rows as Array<{ id: string }>).map((r) => r.id);
+  } catch {
+    return [];
   }
 }

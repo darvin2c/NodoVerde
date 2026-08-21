@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
+import { Button } from "@/components/ui/button.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx";
 import { formatDateTime, timeAgo } from "@/lib/format.ts";
@@ -52,25 +54,18 @@ export function SistemaPage() {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Finca</CardTitle>
-            <CardDescription>identidad desde DB (única fuente de verdad)</CardDescription>
+            <CardTitle className="text-base">Módulos</CardTitle>
+            <CardDescription>salud agregada en vivo — la identidad de fincas vive en /fincas (ADR-0023)</CardDescription>
           </CardHeader>
           <CardContent className="text-sm space-y-1">
-            {status?.farm ? (
-              <>
-                <p className="font-medium">{status.farm.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  {status.farm.location_name ?? "sin ubicación"}{status.farm.tz ? ` · ${status.farm.tz}` : ""}
-                </p>
-              </>
-            ) : (
-              <p className="text-xs text-muted-foreground">sin tenant legible</p>
-            )}
-            {status && Object.keys(status.healthSummary).length > 0 && (
+            {status && Object.keys(status.healthSummary).length > 0 ? (
               <p className="text-xs text-muted-foreground">
                 módulos por estado: {Object.entries(status.healthSummary).map(([k, v]) => `${k}:${v}`).join(" · ")}
               </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">sin health de módulos todavía</p>
             )}
+            <Button variant="link" size="sm" className="px-0" render={<Link to="/fincas" />}>gestionar fincas →</Button>
           </CardContent>
         </Card>
       </div>

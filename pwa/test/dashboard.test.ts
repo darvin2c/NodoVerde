@@ -62,15 +62,15 @@ describe("finance.recentMovements y byCategory", () => {
     expect(rows[1].voided_by).toBe("3");
   });
 
-  it("byCategory devuelve totales numéricos por categoría", async () => {
+  it("byCategory devuelve totales numéricos por categoría y finca (ADR-0023)", async () => {
     const caller = callerWith(mockDb([
-      { category: "nutrientes", total: "230.50" },
-      { category: "software", total: "41.20" }
+      { tenant: "demo", category: "nutrientes", currency: "PEN", total: "230.50" },
+      { tenant: "demo", category: "software", currency: "PEN", total: "41.20" }
     ]));
     const rows = await caller.finance.byCategory({ tenant: "demo" });
     expect(rows).toEqual([
-      { category: "nutrientes", total: 230.5 },
-      { category: "software", total: 41.2 }
+      { tenant: "demo", category: "nutrientes", currency: "PEN", total: 230.5 },
+      { tenant: "demo", category: "software", currency: "PEN", total: 41.2 }
     ]);
   });
 });

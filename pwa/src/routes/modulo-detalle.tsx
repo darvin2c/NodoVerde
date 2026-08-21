@@ -22,6 +22,7 @@ import { Sparkline } from "@/components/sparkline.tsx";
 import { healthVariant } from "@/lib/live.ts";
 import { remediationFor } from "@/lib/remediation.ts";
 import { formatDateTime, formatMetric, timeAgo } from "@/lib/format.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 
 type Range = { min: number | null; max: number | null };
 
@@ -33,38 +34,48 @@ function rangeTone(v: number | null, r: Range): "ok" | "warn" | "neutral" {
 
 export function ModuloDetallePage() {
   const { moduleId } = useParams({ strict: false }) as { moduleId: string };
-  const tenant = "demo";
+  const { active } = useTenant();
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["modules.detail", moduleId],
-    queryFn: () => trpc.modules.detail.query({ tenant, id: moduleId }),
-    refetchInterval: 15000
+  // Tenant: la finca activa; en modo "Todas" el servidor resuelve si el id no es ambiguo (ADR-0023)
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["modules.detail", active, moduleId],
+    queryFn: () => trpc.modules.detail.query(active ? { tenant: active, id: moduleId } : { id: moduleId }),
+    refetchInterval: 15000,
+    retry: false
   });
+
+  // Las series necesitan el tenant resuelto — sale de la respuesta del detalle
+  const resolvedTenant = (data?.module as Record<string, unknown> | undefined)?.tenant as string | undefined;
 
   const { data: ecSeries } = useQuery({
-    queryKey: ["field.series", moduleId, "ec"],
-    queryFn: () => trpc.field.series.query({ tenant, module: moduleId, metric: "ec", hours: 24 }),
-    refetchInterval: 60000
+    queryKey: ["field.series", resolvedTenant, moduleId, "ec"],
+    queryFn: () => trpc.field.series.query({ tenant: resolvedTenant!, module: moduleId, metric: "ec", hours: 24 }),
+    refetchInterval: 60000,
+    enabled: !!resolvedTenant
   });
   const { data: phSeries } = useQuery({
-    queryKey: ["field.series", moduleId, "ph"],
-    queryFn: () => trpc.field.series.query({ tenant, module: moduleId, metric: "ph", hours: 24 }),
-    refetchInterval: 60000
+    queryKey: ["field.series", resolvedTenant, moduleId, "ph"],
+    queryFn: () => trpc.field.series.query({ tenant: resolvedTenant!, module: moduleId, metric: "ph", hours: 24 }),
+    refetchInterval: 60000,
+    enabled: !!resolvedTenant
   });
   const { data: levelSeries } = useQuery({
-    queryKey: ["field.series", moduleId, "level"],
-    queryFn: () => trpc.field.series.query({ tenant, module: moduleId, metric: "level", hours: 24 }),
-    refetchInterval: 60000
+    queryKey: ["field.series", resolvedTenant, moduleId, "level"],
+    queryFn: () => trpc.field.series.query({ tenant: resolvedTenant!, module: moduleId, metric: "level", hours: 24 }),
+    refetchInterval: 60000,
+    enabled: !!resolvedTenant
   });
 
   if (isLoading) return <div className="space-y-4"><Skeleton className="h-24" /><Skeleton className="h-64" /></div>;
 
-  if (!data) {
+  if (error || !data) {
     return (
       <Card>
         <CardHeader><CardTitle>{moduleId}</CardTitle></CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">Módulo no encontrado en la DB.</p>
+          <p className="text-sm text-muted-foreground">
+            {error ? (error as Error).message : "Módulo no encontrado en la DB."}
+          </p>
           <Button variant="link" className="px-0" render={<Link to="/modulos" />}>← volver a módulos</Button>
         </CardContent>
       </Card>
@@ -97,7 +108,7 @@ export function ModuloDetallePage() {
 
       {/* Configuración: nombre, fierro vinculado, retiro (escrituras gobernadas vía MCP, ADR-0022) */}
       <ConfigCard
-        tenant={tenant}
+        tenant={resolvedTenant ?? ""}
         moduleId={moduleId}
         name={(m.name as string | null) ?? null}
         retired={retired}

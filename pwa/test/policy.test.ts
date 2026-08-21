@@ -116,19 +116,20 @@ describe("pending procedures con fetch mockeado", () => {
 
     const caller = callerWith(mockDb());
     const res = await caller.pending.approvals({ tenant: "demo" });
-    expect(res).toEqual(actions);
+    // Cada acción queda etiquetada con su finca (fan-out multi-finca, ADR-0023)
+    expect(res).toEqual(actions.map((a) => ({ ...a, tenant: "demo" })));
   });
 
-  it("approvals maneja array plano", async () => {
+  it("approvals sin tenant itera las fincas activas de la DB", async () => {
     const actions = [{ id: "a2" }];
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       text: async () => JSON.stringify(actions),
     } as unknown as Response) as unknown as typeof fetch;
-    const caller = callerWith(mockDb());
+    const caller = callerWith(mockDb([{ id: "demo" }]));
     const res = await caller.pending.approvals();
-    expect(res).toEqual(actions);
+    expect(res).toEqual([{ id: "a2", tenant: "demo" }]);
   });
 
   it("decide hace POST a /api/approvals/{id}/approve con by pwa", async () => {
@@ -170,7 +171,7 @@ describe("pending procedures con fetch mockeado", () => {
     } as unknown as Response) as unknown as typeof fetch;
     const caller = callerWith(mockDb());
     const res = await caller.pending.workOrders({ tenant: "demo", status: "pending" });
-    expect(res).toEqual(orders);
+    expect(res).toEqual(orders.map((o) => ({ ...o, tenant: "demo" })));
   });
 
   it("completeWorkOrder hace POST con by pwa y note", async () => {

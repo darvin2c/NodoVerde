@@ -21,25 +21,31 @@ import {
 } from "@/components/ui/dialog.tsx";
 import { useLiveModules, healthVariant } from "@/lib/live.ts";
 import { timeAgo, formatMetric } from "@/lib/format.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 
 type ModuleRow = {
   tenant: string; id: string; name: string | null; crop: string; retired_at: string | null;
 };
 
 export function ModulosPage() {
+  const { active, farmName } = useTenant();
   const { data: mods, isLoading } = useQuery({
     queryKey: ["modules.list"],
     queryFn: () => trpc.modules.list.query()
   });
   const { data: field } = useQuery({
-    queryKey: ["field.latest"],
-    queryFn: () => trpc.field.latest.query({ tenant: "demo" }),
+    queryKey: ["field.latest", active],
+    queryFn: () => trpc.field.latest.query(active ? { tenant: active } : undefined),
     refetchInterval: 15000
   });
   const live = useLiveModules();
 
-  const activos = ((mods ?? []) as ModuleRow[]).filter((m) => !m.retired_at);
-  const retirados = ((mods ?? []) as ModuleRow[]).filter((m) => m.retired_at);
+  const visibles = ((mods ?? []) as ModuleRow[]).filter((m) => active === null || m.tenant === active);
+  const activos = visibles.filter((m) => !m.retired_at);
+  const retirados = visibles.filter((m) => m.retired_at);
+  // Agrupar por finca solo en modo "Todas" (ADR-0023)
+  const farmIds = [...new Set(visibles.map((m) => m.tenant))].sort();
+  const groupByFarm = active === null && farmIds.length > 1;
 
   return (
     <div className="space-y-4">
@@ -55,8 +61,33 @@ export function ModulosPage() {
       ) : activos.length === 0 && retirados.length === 0 ? (
         <Card>
           <CardHeader><CardTitle>Módulos</CardTitle></CardHeader>
-          <CardContent><p className="text-sm text-muted-foreground">Sin módulos registrados — crea el primero con "Nuevo módulo".</p></CardContent>
+          <CardContent><p className="text-sm text-muted-foreground">
+            {active === null
+              ? "Sin módulos registrados — selecciona una finca y crea el primero con \"Nuevo módulo\"."
+              : `Sin módulos en ${farmName(active)} — crea el primero con "Nuevo módulo".`}
+          </p></CardContent>
         </Card>
+      ) : groupByFarm ? (
+        farmIds.map((farmId) => {
+          const farmActivos = activos.filter((m) => m.tenant === farmId);
+          const farmRetirados = retirados.filter((m) => m.tenant === farmId);
+          if (farmActivos.length === 0 && farmRetirados.length === 0) return null;
+          return (
+            <div key={farmId} className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">{farmName(farmId)}</p>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                {farmActivos.map((m) => (
+                  <ModuleCard key={`${m.tenant}/${m.id}`} m={m} field={field} live={live} />
+                ))}
+              </div>
+              {farmRetirados.length > 0 && (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  {farmRetirados.map((m) => <RetiredCard key={`${m.tenant}/${m.id}`} m={m} />)}
+                </div>
+              )}
+            </div>
+          );
+        })
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -68,25 +99,29 @@ export function ModulosPage() {
             <div className="space-y-2">
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Retirados — historia conservada (nada se borra)</p>
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                {retirados.map((m) => (
-                  <Link key={`${m.tenant}/${m.id}`} to="/modulos/$moduleId" params={{ moduleId: m.id }}>
-                    <Card className="h-full opacity-60 hover:bg-accent/40 transition-colors">
-                      <CardHeader className="pb-2">
-                        <div className="flex items-center justify-between">
-                          <CardTitle className="text-base">{m.name ?? m.id}</CardTitle>
-                          <Badge variant="outline">retirado</Badge>
-                        </div>
-                        <CardDescription>{m.id} · {m.crop}</CardDescription>
-                      </CardHeader>
-                    </Card>
-                  </Link>
-                ))}
+                {retirados.map((m) => <RetiredCard key={`${m.tenant}/${m.id}`} m={m} />)}
               </div>
             </div>
           )}
         </>
       )}
     </div>
+  );
+}
+
+function RetiredCard({ m }: { m: ModuleRow }) {
+  return (
+    <Link to="/modulos/$moduleId" params={{ moduleId: m.id }}>
+      <Card className="h-full opacity-60 hover:bg-accent/40 transition-colors">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base">{m.name ?? m.id}</CardTitle>
+            <Badge variant="outline">retirado</Badge>
+          </div>
+          <CardDescription>{m.id} · {m.crop}</CardDescription>
+        </CardHeader>
+      </Card>
+    </Link>
   );
 }
 
@@ -98,7 +133,7 @@ function ModuleCard({ m, field, live }: {
   const key = `${m.tenant}/${m.id}`;
   const conf = live.confidence[key];
   const health = live.health[key];
-  const readings = field?.[m.id];
+  const readings = field?.[key];
   const lastReading = readings
     ? Object.values(readings).map((r) => new Date(r.time).getTime()).reduce((a, b) => Math.max(a, b), 0)
     : 0;
@@ -133,17 +168,22 @@ function ModuleCard({ m, field, live }: {
 
 function NuevoModuloDialog() {
   const queryClient = useQueryClient();
+  const { active, tenants } = useTenant();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [crop, setCrop] = useState("");
+  const [farmId, setFarmId] = useState("");
 
   const { data: crops } = useQuery({
     queryKey: ["modules.crops"],
     queryFn: () => trpc.modules.crops.query()
   });
 
+  // Finca destino: la activa en el selector, o la elegida en el diálogo (modo Todas)
+  const targetFarm = active ?? farmId;
+
   const createMut = useMutation({
-    mutationFn: () => trpc.modules.create.mutate({ tenant: "demo", name: name.trim(), crop }),
+    mutationFn: () => trpc.modules.create.mutate({ tenant: targetFarm, name: name.trim(), crop }),
     onSuccess: (result) => {
       const mod = (result as { module?: { id: string } } | undefined)?.module;
       toast.success("Módulo creado", {
@@ -154,13 +194,14 @@ function NuevoModuloDialog() {
       setOpen(false);
       setName("");
       setCrop("");
+      setFarmId("");
     },
     onError: (err) => {
       toast.error("No se pudo crear", { description: (err as Error).message });
     }
   });
 
-  const valid = name.trim().length > 0 && crop.length > 0;
+  const valid = name.trim().length > 0 && crop.length > 0 && targetFarm.length > 0;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -176,6 +217,19 @@ function NuevoModuloDialog() {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
+          {active === null && (
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">Finca</span>
+              <select
+                value={farmId}
+                onChange={(e) => setFarmId(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              >
+                <option value="" disabled>elige finca…</option>
+                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </label>
+          )}
           <label className="block space-y-1">
             <span className="text-xs font-medium">Nombre</span>
             <Input

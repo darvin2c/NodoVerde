@@ -1,6 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
-  LayoutDashboard, Boxes, TriangleAlert, Wallet, CheckSquare, Camera, Activity, Sprout
+  LayoutDashboard, Boxes, TriangleAlert, Wallet, CheckSquare, Camera, Activity, Sprout, MapPinned
 } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent,
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/sidebar.tsx";
 import { useQuery } from "@tanstack/react-query";
 import { trpc } from "../../trpc.ts";
+import { useTenant } from "@/components/tenant-provider.tsx";
 
 const NAV_MAIN = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -23,15 +24,17 @@ const NAV_OPS = [
 ] as const;
 
 const NAV_SYS = [
+  { to: "/fincas", label: "Fincas", icon: MapPinned },
   { to: "/sistema", label: "Sistema", icon: Activity },
 ] as const;
 
 export function AppSidebar() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { active } = useTenant();
 
   const { data: kpis } = useQuery({
-    queryKey: ["overview.kpis"],
-    queryFn: () => trpc.overview.kpis.query({ tenant: "demo" }),
+    queryKey: ["overview.kpis", active],
+    queryFn: () => trpc.overview.kpis.query(active ? { tenant: active } : undefined),
     refetchInterval: 15000
   });
   const openAlerts = (kpis?.openAlerts.warn ?? 0) + (kpis?.openAlerts.critical ?? 0);
