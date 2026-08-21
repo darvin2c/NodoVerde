@@ -124,6 +124,7 @@ async function syncCropsFromBatches(): Promise<void> {
      LEFT JOIN LATERAL (
        SELECT lo.crop FROM lotes lo
        WHERE lo.tenant = d.tenant AND lo.state = 'open' AND lo.modules ? d.module
+         AND lo.started_at <= now()  -- ADR-0026: lote programado (inicio futuro) aún no siembra plantas
        ORDER BY lo.started_at DESC LIMIT 1
      ) l ON true
      WHERE d.tenant = $1`,

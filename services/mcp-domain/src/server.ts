@@ -25,6 +25,9 @@ import {
   listInvariantAlertsDb,
   insertBatchDb,
   closeBatchDb,
+  removeModuleFromBatchDb,
+  computeExpectedEnd,
+  canRemoveModuleFromBatch,
   setModulesCropDb,
   insertCropProfileDb,
   updateCropProfileDb,
@@ -333,16 +336,18 @@ export function createMcpServer(): McpServer {
     "open_batch",
     {
       title: "Abrir lote de producción",
-      description: "Abre un lote: cultivo + módulos EXPLÍCITOS + etiqueta de campaña opcional. Regla física: un módulo solo está en UN lote activo; los módulos son infraestructura fungible (ADR-0025) — cualquier módulo libre acepta cualquier cultivo, y al abrir el lote el cultivo queda escrito en los módulos (caché); módulos retirados no entran. Calcula profile_hash (sha256 del row crop_profiles), memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente) y expected_end_at (started_at + cycle_days, null si el perfil no tiene ciclo).",
+      description: "Abre un lote: cultivo + módulos EXPLÍCITOS + etiqueta de campaña opcional. Regla física: un módulo solo está en UN lote activo; los módulos son infraestructura fungible (ADR-0025) — cualquier módulo libre acepta cualquier cultivo, y al abrir el lote el cultivo queda escrito en los módulos (caché); módulos retirados no entran. Fechas gobernadas por el humano (ADR-0026): started_at elegible (pasada = registro tardío, futura = programación; default ahora) y expected_end_at con override manual (default started_at + cycle_days del perfil, null si el perfil no tiene ciclo). Un lote con inicio futuro ocupa sus mesas desde ya. Calcula profile_hash (sha256 del row crop_profiles) y memory_hash (sha256 de $WORKSPACES_PATH/experto-<crop>/MEMORY.md, null si ausente).",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         crop: z.string().describe("Cultivo/programa (crop_profiles.name)"),
         modules: z.array(z.string()).min(1).describe("Módulos que ocupa el lote (mod-N) — explícitos, uno o varios, deben estar libres"),
         campaign: z.string().optional().describe("Etiqueta lógica libre de temporada, ej 'invierno-2026' (null = sin campaña)"),
         note: z.string().optional().describe("Nota opcional de apertura"),
+        started_at: z.string().optional().describe("Inicio del ciclo ISO (ADR-0026): pasada = registro tardío, futura = programación. Default: ahora"),
+        expected_end_at: z.string().optional().describe("Override manual de la cosecha esperada ISO (ADR-0026). Default: started_at + cycle_days del perfil"),
       },
     },
-    async ({ tenant, crop, modules, campaign, note }) => {
+    async ({ tenant, crop, modules, campaign, note, started_at, expected_end_at }) => {
       const profile = await getCropProfileDb(crop);
       if (!profile) {
         return {
@@ -374,20 +379,41 @@ export function createMcpServer(): McpServer {
           structuredContent: { error: "modules_occupied", tenant, occupied_by: occupied.map((o) => o.code) } as unknown as Record<string, unknown>,
         };
       }
+      // ADR-0026: fechas gobernadas por el humano — inicio elegible, fin con override
+      const startedAt = started_at ? new Date(started_at) : new Date();
+      if (Number.isNaN(+startedAt)) {
+        return {
+          content: [{ type: "text", text: `started_at inválido: ${started_at}` }],
+          structuredContent: { error: "invalid_started_at", started_at } as unknown as Record<string, unknown>,
+        };
+      }
+      const overrideEnd = expected_end_at ? new Date(expected_end_at) : null;
+      if (overrideEnd && Number.isNaN(+overrideEnd)) {
+        return {
+          content: [{ type: "text", text: `expected_end_at inválido: ${expected_end_at}` }],
+          structuredContent: { error: "invalid_expected_end_at", expected_end_at } as unknown as Record<string, unknown>,
+        };
+      }
+      if (overrideEnd && +overrideEnd <= +startedAt) {
+        return {
+          content: [{ type: "text", text: `expected_end_at (${overrideEnd.toISOString()}) debe ser posterior a started_at (${startedAt.toISOString()})` }],
+          structuredContent: { error: "end_before_start", started_at: startedAt, expected_end_at: overrideEnd } as unknown as Record<string, unknown>,
+        };
+      }
       const cycleDays = (profile as Record<string, unknown>).cycle_days as number | null;
-      const expectedEndAt = cycleDays != null ? new Date(Date.now() + cycleDays * 86400000) : null;
+      const expectedEndAt = computeExpectedEnd(startedAt, cycleDays, overrideEnd);
       const profileHash = computeProfileHash(profile as Record<string, unknown>);
       const memoryHash = await computeMemoryHash(crop);
       const { id, code } = await insertBatchDb({
         tenant, crop, campaign: campaign ?? null, modulesJson: JSON.stringify(modules),
-        expectedEndAt, profileHash, memoryHash, note: note ?? null,
+        startedAt, expectedEndAt, profileHash, memoryHash, note: note ?? null,
       });
       // ADR-0025: el lote pone el cultivo en las mesas que ocupa (caché; única escritora)
       await setModulesCropDb(tenant, modules, crop);
-      const text = `Lote abierto ${code} (${id}) tenant=${tenant} crop=${crop} modules=${modules.join(",")}${campaign ? ` campaña='${campaign}'` : ""} profile_hash=${profileHash.slice(0, 8)}…`;
+      const text = `Lote abierto ${code} (${id}) tenant=${tenant} crop=${crop} modules=${modules.join(",")}${campaign ? ` campaña='${campaign}'` : ""} inicio=${startedAt.toISOString()}${expectedEndAt ? ` cosecha=${expectedEndAt.toISOString()}` : ""} profile_hash=${profileHash.slice(0, 8)}…`;
       return {
-        content: [{ type: "text", text: `${text}\n${summaryText({ id, code, tenant, crop, campaign, modules, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash })}` }],
-        structuredContent: { id, code, tenant, crop, campaign: campaign ?? null, modules, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash } as unknown as Record<string, unknown>,
+        content: [{ type: "text", text: `${text}\n${summaryText({ id, code, tenant, crop, campaign, modules, started_at: startedAt, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash })}` }],
+        structuredContent: { id, code, tenant, crop, campaign: campaign ?? null, modules, started_at: startedAt, expected_end_at: expectedEndAt, profile_hash: profileHash, memory_hash: memoryHash } as unknown as Record<string, unknown>,
       };
     },
   );
@@ -426,6 +452,52 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text: `${text}\n${summaryText({ id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose })}` }],
         structuredContent: { id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — remove_module_from_batch (ADR-0026) --------------------------------------
+  server.registerTool(
+    "remove_module_from_batch",
+    {
+      title: "Retirar módulo de un lote",
+      description: "Saca un módulo de un lote activo SIN cerrarlo — el lote sigue con las mesas restantes (ej: cambiar de cultivo en una sola mesa). La mesa retirada queda libre (crop null). Regla dura: la última mesa no se retira — un lote sin mesas no existe; usa close_batch.",
+      inputSchema: {
+        id: z.string().uuid().describe("Id del lote"),
+        module: z.string().describe("Módulo a retirar (mod-N)"),
+      },
+    },
+    async ({ id, module }) => {
+      const batch = await getBatchDb(id);
+      if (!batch) {
+        return {
+          content: [{ type: "text", text: `lote no existe: ${id}` }],
+          structuredContent: { error: "batch_not_found", id } as unknown as Record<string, unknown>,
+        };
+      }
+      if (batch.state !== "open") {
+        return {
+          content: [{ type: "text", text: `lote ya cerrado: ${batch.code}` }],
+          structuredContent: { error: "batch_already_closed", id, code: batch.code } as unknown as Record<string, unknown>,
+        };
+      }
+      const check = canRemoveModuleFromBatch(batch.modules, module);
+      if (!check.ok) {
+        const text = check.reason === "last_module"
+          ? `${module} es la última mesa de ${batch.code} — un lote sin mesas no existe: usa close_batch`
+          : `${module} no está en el lote ${batch.code}`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: { error: check.reason, id, code: batch.code, module } as unknown as Record<string, unknown>,
+        };
+      }
+      const row = await removeModuleFromBatchDb(id, JSON.stringify(check.remaining));
+      // La mesa retirada vuelve a estar libre (caché ADR-0025)
+      await setModulesCropDb(batch.tenant, [module], null);
+      const text = `Módulo ${module} retirado de ${row?.code ?? id} — quedan: ${check.remaining.join(", ")}`;
+      return {
+        content: [{ type: "text", text: `${text}\n${summaryText({ id, code: row?.code, removed: module, remaining: check.remaining })}` }],
+        structuredContent: { id, code: row?.code, removed: module, remaining: check.remaining } as unknown as Record<string, unknown>,
       };
     },
   );

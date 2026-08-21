@@ -135,10 +135,16 @@ export function openBatch(args: {
   modules: string[];
   campaign?: string;
   note?: string;
+  started_at?: string;
+  expected_end_at?: string;
 }): Promise<unknown> {
   return callDomainTool("open_batch", args);
 }
 
 export function closeBatch(args: { id: string; reason: string; note?: string }): Promise<unknown> {
   return callDomainTool("close_batch", args);
+}
+
+export function removeModuleFromBatch(args: { id: string; module: string }): Promise<unknown> {
+  return callDomainTool("remove_module_from_batch", args);
 }

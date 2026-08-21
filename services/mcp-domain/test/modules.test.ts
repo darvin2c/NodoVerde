@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { isValidHwId, nextModuleId, moduleInBatch } from "../src/write.js";
+import { isValidHwId, nextModuleId, moduleInBatch, computeExpectedEnd, canRemoveModuleFromBatch } from "../src/write.js";
 
 // Lógica pura del provisionamiento gobernado de módulos (ADR-0022).
 // Las reglas duras (bloqueo por lote activo, un fierro por módulo) viven en
@@ -99,5 +99,52 @@ describe("isValidProfileRanges — coherencia biológica", () => {
   it("rechaza pH fuera de 0-14 y valores no finitos", () => {
     expect(isValidProfileRanges({ ...ok, ph_max: 15 })).toBe(false);
     expect(isValidProfileRanges({ ...ok, ec_min: NaN })).toBe(false);
+  });
+});
+
+describe("computeExpectedEnd — fechas gobernadas por el humano (ADR-0026)", () => {
+  const start = new Date("2026-08-21T12:00:00Z");
+
+  it("override manual gana sobre el cálculo del perfil", () => {
+    const override = new Date("2026-10-01T00:00:00Z");
+    expect(computeExpectedEnd(start, 35, override)).toEqual(override);
+  });
+
+  it("sin override: inicio + cycle_days", () => {
+    const end = computeExpectedEnd(start, 35, null);
+    expect(end).toEqual(new Date(start.getTime() + 35 * 86400000));
+  });
+
+  it("perfil sin ciclo y sin override → null (honesto: sin fin estimado)", () => {
+    expect(computeExpectedEnd(start, null, null)).toBeNull();
+  });
+
+  it("inicio pasado (registro tardío) empuja el fin al pasado correspondiente", () => {
+    const past = new Date("2026-08-01T00:00:00Z");
+    expect(computeExpectedEnd(past, 10, null)).toEqual(new Date("2026-08-11T00:00:00Z"));
+  });
+});
+
+describe("canRemoveModuleFromBatch — retiro sin cerrar el lote (ADR-0026)", () => {
+  it("retira una mesa y devuelve las restantes", () => {
+    const r = canRemoveModuleFromBatch(["mod-1", "mod-2", "mod-3"], "mod-2");
+    expect(r).toEqual({ ok: true, remaining: ["mod-1", "mod-3"] });
+  });
+
+  it("acepta modules como string JSONB (tal cual viene de pg)", () => {
+    const r = canRemoveModuleFromBatch('["mod-1","mod-2"]', "mod-1");
+    expect(r).toEqual({ ok: true, remaining: ["mod-2"] });
+  });
+
+  it("la última mesa NO se retira — el lote se cierra con close_batch", () => {
+    expect(canRemoveModuleFromBatch(["mod-1"], "mod-1")).toEqual({ ok: false, reason: "last_module" });
+  });
+
+  it("módulo ajeno al lote → module_not_in_batch", () => {
+    expect(canRemoveModuleFromBatch(["mod-1", "mod-2"], "mod-9")).toEqual({ ok: false, reason: "module_not_in_batch" });
+  });
+
+  it("modules corrupto → module_not_in_batch (defensivo)", () => {
+    expect(canRemoveModuleFromBatch("no-json", "mod-1")).toEqual({ ok: false, reason: "module_not_in_batch" });
   });
 });

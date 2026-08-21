@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Sprout, X, Boxes } from "lucide-react";
 import { toast } from "sonner";
@@ -49,13 +49,28 @@ function cropColor(crop: string): string {
 
 const DAY = 86400000;
 
-function daysOf(lote: Lote): { elapsed: number; total: number | null; pct: number | null; overdue: boolean } {
+/** Date → "YYYY-MM-DD" local (para <input type="date">). */
+function toInputDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** "YYYY-MM-DD" + N días → "YYYY-MM-DD" (aritmética de calendario local). */
+function addDaysStr(ymd: string, days: number): string {
+  const d = new Date(`${ymd}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  return toInputDate(d);
+}
+
+function daysOf(lote: Lote): { elapsed: number; total: number | null; pct: number | null; overdue: boolean; scheduled: boolean; startsInDays: number } {
   const start = +new Date(lote.startedAt);
   const now = Date.now();
+  // ADR-0026: inicio futuro = lote programado — ocupa su mesa pero aún no vive días
+  const scheduled = start > now;
+  const startsInDays = scheduled ? Math.ceil((start - now) / DAY) : 0;
   const elapsed = Math.max(0, Math.floor((now - start) / DAY));
-  if (!lote.expectedEndAt) return { elapsed, total: null, pct: null, overdue: false };
+  if (!lote.expectedEndAt) return { elapsed, total: null, pct: null, overdue: false, scheduled, startsInDays };
   const total = Math.max(1, Math.round((+new Date(lote.expectedEndAt) - start) / DAY));
-  return { elapsed, total, pct: Math.min(100, Math.round((elapsed / total) * 100)), overdue: now > +new Date(lote.expectedEndAt) };
+  return { elapsed, total, pct: Math.min(100, Math.round((elapsed / total) * 100)), overdue: !scheduled && now > +new Date(lote.expectedEndAt), scheduled, startsInDays };
 }
 
 export function ProduccionPage() {
@@ -92,6 +107,17 @@ export function ProduccionPage() {
     [modulesList, active]
   );
 
+  // KPIs de cabecera: el pulso de la producción en un vistazo
+  const kpis = useMemo(() => {
+    const now = Date.now();
+    const scheduledCount = open.filter((l) => +new Date(l.startedAt) > now).length;
+    const occupiedCount = visibleModules.filter((m) => occupancy.has(`${m.tenant}/${m.id}`)).length;
+    const next = open
+      .filter((l) => l.expectedEndAt != null)
+      .sort((a, b) => +new Date(a.expectedEndAt!) - +new Date(b.expectedEndAt!))[0] ?? null;
+    return { scheduledCount, occupiedCount, totalModules: visibleModules.length, next };
+  }, [open, visibleModules, occupancy]);
+
   if (isLoading) {
     return <div className="space-y-4"><Skeleton className="h-40" /><Skeleton className="h-40" /></div>;
   }
@@ -111,6 +137,53 @@ export function ProduccionPage() {
           </p>
         </div>
         <AbrirLoteDialog openLotes={open} />
+      </div>
+
+      {/* KPIs: el pulso de la producción en un vistazo */}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Lotes activos</p>
+            <p className="text-2xl font-semibold tracking-tight">{open.length}</p>
+            <p className="text-xs text-muted-foreground">
+              {kpis.scheduledCount > 0
+                ? `${kpis.scheduledCount} programado${kpis.scheduledCount === 1 ? "" : "s"} a futuro`
+                : open.length > 0 ? "todos en curso" : "nada en producción"}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Mesas ocupadas</p>
+            <p className="text-2xl font-semibold tracking-tight">
+              {kpis.occupiedCount}<span className="text-base font-normal text-muted-foreground">/{kpis.totalModules}</span>
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {kpis.totalModules - kpis.occupiedCount} libre{kpis.totalModules - kpis.occupiedCount === 1 ? "" : "s"} para el próximo trasplante
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Próxima cosecha</p>
+            {kpis.next ? (
+              <>
+                <p className="text-lg font-semibold tracking-tight truncate">{kpis.next.code} · {formatDay(kpis.next.expectedEndAt!)}</p>
+                <p className="text-xs text-muted-foreground">
+                  {kpis.next.crop} · {(() => {
+                    const left = Math.ceil((+new Date(kpis.next.expectedEndAt!) - Date.now()) / DAY);
+                    return left < 0 ? "fecha pasada — cierra el lote" : left === 0 ? "hoy" : `en ${left} ${left === 1 ? "día" : "días"}`;
+                  })()}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-lg font-semibold tracking-tight">—</p>
+                <p className="text-xs text-muted-foreground">sin fechas estimadas</p>
+              </>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Etiquetas de campaña: agrupación lógica, texto libre (ADR-0024) */}
@@ -155,11 +228,12 @@ export function ProduccionPage() {
                 <div
                   className={cn(
                     "relative flex-1 h-6 rounded-md bg-muted/50 overflow-hidden",
-                    d.overdue && "ring-2 ring-destructive"
+                    d.overdue && "ring-2 ring-destructive",
+                    d.scheduled && "border border-dashed border-muted-foreground/40"
                   )}
                   title={`${l.code}: inicio ${formatDay(l.startedAt)}${l.expectedEndAt ? ` → cosecha esperada ${formatDay(l.expectedEndAt)}` : ""}`}
                 >
-                  {d.pct != null && (
+                  {d.pct != null && !d.scheduled && (
                     <div
                       className={cn("absolute inset-y-0 left-0", d.overdue ? "bg-destructive" : cropColor(l.crop))}
                       style={{ width: `${Math.max(d.pct, 1.5)}%` }}
@@ -170,14 +244,16 @@ export function ProduccionPage() {
                 <p
                   className={cn(
                     "w-64 shrink-0 text-xs text-right font-medium whitespace-nowrap",
-                    d.overdue ? "text-destructive" : "text-foreground"
+                    d.overdue ? "text-destructive" : d.scheduled ? "text-muted-foreground" : "text-foreground"
                   )}
                 >
-                  {d.total != null
-                    ? d.overdue
-                      ? `día ${d.elapsed} de ${d.total} · cosecha pasada (${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""})`
-                      : `día ${d.elapsed} de ${d.total} · ${d.pct}% · cosecha ${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""}`
-                    : `día ${d.elapsed} · sin fin estimado`}
+                  {d.scheduled
+                    ? `programado · inicia ${formatDay(l.startedAt)} (en ${d.startsInDays} ${d.startsInDays === 1 ? "día" : "días"})`
+                    : d.total != null
+                      ? d.overdue
+                        ? `día ${d.elapsed} de ${d.total} · cosecha pasada (${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""})`
+                        : `día ${d.elapsed} de ${d.total} · ${d.pct}% · cosecha ${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""}`
+                      : `día ${d.elapsed} · sin fin estimado`}
                 </p>
                 <CerrarLoteDialog lote={l} />
               </div>
@@ -218,10 +294,18 @@ export function ProduccionPage() {
                 </div>
                 <p className="text-xs text-muted-foreground truncate">
                   {lote.code} · {lote.crop}
-                  {d.total != null ? ` · día ${d.elapsed} de ${d.total}` : ` · día ${d.elapsed}`}
+                  {d.scheduled
+                    ? ` · inicia ${formatDay(lote.startedAt)}`
+                    : d.total != null ? ` · día ${d.elapsed} de ${d.total}` : ` · día ${d.elapsed}`}
                 </p>
-                {d.pct != null && <Progress value={d.pct} />}
-                {d.overdue && <Badge variant="destructive">cosecha pasada</Badge>}
+                {d.pct != null && !d.scheduled && <Progress value={d.pct} />}
+                <div className="flex items-center gap-2">
+                  {d.scheduled && <Badge variant="outline">programado</Badge>}
+                  {d.overdue && <Badge variant="destructive">cosecha pasada</Badge>}
+                  {lote.modules.length > 1 && (
+                    <RetirarModuloDialog lote={lote} moduleId={m.id} moduleName={m.name ?? m.id} />
+                  )}
+                </div>
               </div>
             );
           })}
@@ -277,9 +361,22 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [campaign, setCampaign] = useState("");
   const [note, setNote] = useState("");
+  // ADR-0026: fechas gobernadas por el humano — inicio elegible, fin con override
+  const [startDate, setStartDate] = useState(() => toInputDate(new Date()));
+  const [endDate, setEndDate] = useState("");
+  const [endTouched, setEndTouched] = useState(false);
 
   const { data: crops } = useQuery({ queryKey: ["modules.crops"], queryFn: () => trpc.modules.crops.query() });
   const { data: modulesList } = useQuery({ queryKey: ["modules.list"], queryFn: () => trpc.modules.list.query() });
+  const { data: profiles } = useQuery({ queryKey: ["profiles.list"], queryFn: () => trpc.profiles.list.query() });
+
+  const cycleDays = useMemo(() => profiles?.find((p) => p.name === crop)?.cycle_days ?? null, [profiles, crop]);
+
+  // Cosecha tentativa viva: inicio + cycle_days del perfil — hasta que el humano la toca
+  useEffect(() => {
+    if (endTouched) return;
+    setEndDate(crop && cycleDays != null && startDate ? addDaysStr(startDate, cycleDays) : "");
+  }, [crop, cycleDays, startDate, endTouched]);
 
   const targetFarm = active ?? farmId;
 
@@ -307,22 +404,27 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
   const openMut = useMutation({
     mutationFn: () => trpc.batches.open.mutate({
       tenant: targetFarm, crop, modules: selected,
-      campaign: campaign.trim() || undefined, note: note.trim() || undefined
+      campaign: campaign.trim() || undefined, note: note.trim() || undefined,
+      started_at: new Date(`${startDate}T00:00:00`).toISOString(),
+      expected_end_at: endDate ? new Date(`${endDate}T00:00:00`).toISOString() : undefined
     }),
     onSuccess: (result) => {
       const r = result as { code?: string; expected_end_at?: string | null } | undefined;
       toast.success("Lote abierto", {
-        description: `${r?.code ?? ""} · ${crop} en ${selected.join(", ")}${r?.expected_end_at ? ` — cosecha esperada ${formatDateTime(r.expected_end_at)}` : ""}`
+        description: `${r?.code ?? ""} · ${crop} en ${selected.join(", ")}${r?.expected_end_at ? ` — cosecha esperada ${formatDay(r.expected_end_at)}` : ""}`
       });
       queryClient.invalidateQueries({ queryKey: ["batches.list"] });
+      queryClient.invalidateQueries({ queryKey: ["modules.list"] });
       queryClient.invalidateQueries({ queryKey: ["overview.kpis"] });
       setOpen(false);
       setCrop(""); setSelected([]); setCampaign(""); setNote(""); setFarmId("");
+      setStartDate(toInputDate(new Date())); setEndDate(""); setEndTouched(false);
     },
     onError: (err) => toast.error("No se pudo abrir", { description: (err as Error).message })
   });
 
-  const valid = targetFarm.length > 0 && crop.length > 0 && selected.length > 0;
+  const endInvalid = endDate !== "" && startDate !== "" && endDate <= startDate;
+  const valid = targetFarm.length > 0 && crop.length > 0 && selected.length > 0 && !endInvalid;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -333,8 +435,9 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
         <DialogHeader>
           <DialogTitle>Abrir lote de producción</DialogTitle>
           <DialogDescription>
-            El ciclo nace hoy. La cosecha esperada se calcula del perfil del cultivo;
-            la campaña es solo una etiqueta para agrupar después (ej: invierno-2026).
+            Tú defines cuándo empieza el ciclo: hoy por defecto, una fecha pasada si
+            registras tarde, o futura si estás programando. La cosecha tentativa sale
+            del perfil del cultivo y puedes ajustarla.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
@@ -390,6 +493,34 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
               </div>
             </div>
           )}
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">Inicio del ciclo</span>
+              <Input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">Cosecha tentativa</span>
+              <Input
+                type="date"
+                value={endDate}
+                onChange={(e) => { setEndDate(e.target.value); setEndTouched(true); }}
+                className={cn(endInvalid && "border-destructive")}
+              />
+            </label>
+          </div>
+          {crop && (
+            <p className={cn("text-xs", endInvalid ? "text-destructive" : "text-muted-foreground")}>
+              {endInvalid
+                ? "La cosecha debe ser posterior al inicio"
+                : endDate
+                  ? `Ciclo de ${Math.round((+new Date(`${endDate}T00:00:00`) - +new Date(`${startDate}T00:00:00`)) / DAY)} días${endTouched ? " · ajustada a mano" : cycleDays != null ? " · según perfil" : ""}${+new Date(`${startDate}T00:00:00`) > Date.now() ? " · el lote nace programado y ocupa su mesa desde ya" : ""}`
+                  : "El perfil no define ciclo — ponla a mano o el lote queda sin fin estimado"}
+            </p>
+          )}
           <label className="block space-y-1">
             <span className="text-xs font-medium">Campaña (etiqueta opcional)</span>
             <Input
@@ -410,6 +541,49 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
         <DialogFooter>
           <Button onClick={() => openMut.mutate()} disabled={!valid || openMut.isPending}>
             {openMut.isPending ? "Abriendo…" : "Abrir lote"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Diálogo: retirar módulo del lote (ADR-0026) ─────────────────────────────
+function RetirarModuloDialog({ lote, moduleId, moduleName }: { lote: Lote; moduleId: string; moduleName: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const mut = useMutation({
+    mutationFn: () => trpc.batches.removeModule.mutate({ id: lote.id, module: moduleId }),
+    onSuccess: () => {
+      toast.success("Mesa retirada", {
+        description: `${moduleName} quedó libre — ${lote.code} sigue con ${lote.modules.length - 1} ${lote.modules.length - 1 === 1 ? "mesa" : "mesas"}`
+      });
+      queryClient.invalidateQueries({ queryKey: ["batches.list"] });
+      queryClient.invalidateQueries({ queryKey: ["modules.list"] });
+      setOpen(false);
+    },
+    onError: (err) => toast.error("No se pudo retirar", { description: (err as Error).message })
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-muted-foreground" />}>
+        retirar
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Retirar {moduleName} de {lote.code}</DialogTitle>
+          <DialogDescription>
+            La mesa queda libre de inmediato (para otro cultivo). El lote sigue vivo
+            con sus otras {lote.modules.length - 1} {lote.modules.length - 1 === 1 ? "mesa" : "mesas"} —
+            para terminar el ciclo completo usa «cerrar» en la línea de tiempo.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancelar</Button>
+          <Button onClick={() => mut.mutate()} disabled={mut.isPending}>
+            {mut.isPending ? "Retirando…" : "Retirar mesa"}
           </Button>
         </DialogFooter>
       </DialogContent>
