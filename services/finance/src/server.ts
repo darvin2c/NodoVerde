@@ -162,7 +162,7 @@ export function createMcpServer(): McpServer {
     {
       title: "Resumen de costos",
       description:
-        "Totales gasto/ingreso/neto por grupo (crop|module|category). El LLM pasa filtros crudos; SQL hace todas las sumas. Responde ¿cuánto costó X?",
+        "Totales gasto/ingreso/neto por grupo (crop|module|category). El LLM pasa filtros crudos; SQL hace todas las sumas. Responde ¿cuánto costó X? crop = cultivo del lote vigente en el momento del movimiento (ADR-0025); movimientos fuera de todo lote caen en 'sin_lote'.",
       inputSchema: {
         tenant: z.string().optional(),
         from: z.string().optional().describe("ISO fecha desde"),

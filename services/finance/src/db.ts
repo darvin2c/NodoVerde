@@ -258,18 +258,28 @@ export async function costSummaryDb(params: {
   let groupExpr: string;
   let selectExpr: string;
   if (params.group_by === "crop") {
-    // JOIN attribution → modules para crop: desglosa por attribution pct
-    // Para simplicidad: agrupa por modules.crop del primer módulo de attribution.
-    // Implementación: LATERAL jsonb_array_elements + JOIN modules
+    // ADR-0025: el cultivo NO vive en el módulo (infraestructura fungible) — se
+    // resuelve por la VENTANA del lote: el lote que contenía ese módulo cuando
+    // ocurrió el movimiento. Sin lote en ese instante → 'sin_lote' (honesto:
+    // el gasto no pertenece a ningún cultivo). Sobrevive al cierre del lote y
+    // al cambio de cultivo de la mesa — comparabilidad entre ciclos (ADR-0012).
     const sql = `
-      SELECT mod.crop AS grp,
+      SELECT COALESCE(lote.crop, 'sin_lote') AS grp,
              SUM(CASE WHEN m.kind='gasto' THEN m.amount * (elem->>'pct')::numeric/100 ELSE 0 END) AS gasto,
              SUM(CASE WHEN m.kind='ingreso' THEN m.amount * (elem->>'pct')::numeric/100 ELSE 0 END) AS ingreso
       FROM movements m
       CROSS JOIN LATERAL jsonb_array_elements(m.attribution) AS elem
-      JOIN modules mod ON mod.tenant = m.tenant AND mod.id = elem->>'module'
+      LEFT JOIN LATERAL (
+        SELECT l.crop FROM lotes l
+        WHERE l.tenant = m.tenant
+          AND l.modules ? (elem->>'module')
+          AND l.started_at <= m.ts
+          AND (l.closed_at IS NULL OR m.ts <= l.closed_at)
+        ORDER BY l.started_at DESC
+        LIMIT 1
+      ) lote ON true
       ${where}
-      GROUP BY mod.crop ORDER BY mod.crop`;
+      GROUP BY 1 ORDER BY 1`;
     const res = await pool.query(sql, qParams);
     return res.rows.map((r: { grp: string; gasto: string; ingreso: string }) => ({
       group: r.grp,

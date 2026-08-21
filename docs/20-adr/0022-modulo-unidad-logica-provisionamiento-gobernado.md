@@ -6,9 +6,12 @@ tags: [adr, módulo, provisionamiento, claiming, pwa, home-assistant, fase6]
 created: 2026-08-20
 status: aceptado
 amplia: ADR-0011, ADR-0015, ADR-0019, ADR-0021
+superseded_parcial: "ADR-0025 (el módulo deja de tener cultivo propio: modules.crop es caché mantenido por el ciclo del lote; create/update_module ya no aceptan cultivo; la actuación biológica exige lote activo)"
 ---
 
 # ADR-0022: Módulo como unidad lógica nombrada — provisionamiento gobernado vía MCP y PWA
+
+> **SUPERSEDED parcial por ADR-0025 (2026-08-21).** El módulo deja de tener cultivo propio: `modules.crop` pasa a ser caché nullable mantenido solo por `open_batch`/`close_batch` (mesa libre = sin cultivo, honesto); `create_module`/`update_module` ya no aceptan cultivo; la actuación biológica (dosificación) exige lote activo en el portero. El texto original queda como registro histórico:
 
 ## Contexto
 

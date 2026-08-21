@@ -48,13 +48,14 @@ export type WorkOrderRow = {
 export type ModuleCropInfo = {
   tenant: string;
   module: string;
-  crop: string;
-  ec_min: number;
-  ec_max: number;
-  ph_min: number;
-  ph_max: number;
-  water_temp_min: number;
-  water_temp_max: number;
+  // ADR-0025: crop es caché del lote activo — null = mesa LIBRE (sin lote)
+  crop: string | null;
+  ec_min: number | null;
+  ec_max: number | null;
+  ph_min: number | null;
+  ph_max: number | null;
+  water_temp_min: number | null;
+  water_temp_max: number | null;
   tz: string | null;
 };
 
@@ -62,28 +63,31 @@ export type ModuleCropInfo = {
 // Reads
 // ---------------------------------------------------------------------------
 export async function getModuleWithCrop(tenant: string, module: string): Promise<ModuleCropInfo | null> {
+  // LEFT JOIN: mesa libre (crop NULL, ADR-0025) retorna fila con rangos null —
+  // el portero distingue "módulo no existe" (sin fila) de "sin lote activo".
   const res = await pool.query(
     `SELECT m.tenant, m.id as module, m.crop,
             cp.ec_min, cp.ec_max, cp.ph_min, cp.ph_max, cp.water_temp_min, cp.water_temp_max,
             t.tz
      FROM modules m
-     JOIN crop_profiles cp ON cp.name = m.crop
+     LEFT JOIN crop_profiles cp ON cp.name = m.crop
      JOIN tenants t ON t.id = m.tenant
      WHERE m.tenant = $1 AND m.id = $2`,
     [tenant, module],
   );
   if (res.rows.length === 0) return null;
   const r = res.rows[0] as Record<string, unknown>;
+  const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
   return {
     tenant: r.tenant as string,
     module: r.module as string,
-    crop: r.crop as string,
-    ec_min: Number(r.ec_min),
-    ec_max: Number(r.ec_max),
-    ph_min: Number(r.ph_min),
-    ph_max: Number(r.ph_max),
-    water_temp_min: Number(r.water_temp_min),
-    water_temp_max: Number(r.water_temp_max),
+    crop: (r.crop as string | null) ?? null,
+    ec_min: num(r.ec_min),
+    ec_max: num(r.ec_max),
+    ph_min: num(r.ph_min),
+    ph_max: num(r.ph_max),
+    water_temp_min: num(r.water_temp_min),
+    water_temp_max: num(r.water_temp_max),
     tz: (r.tz as string | null) ?? null,
   };
 }

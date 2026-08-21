@@ -99,7 +99,7 @@ export function ModuloDetallePage() {
         <div className="flex-1">
           <h1 className="text-xl font-bold tracking-tight">
             {displayName}{" "}
-            <span className="text-sm font-normal text-muted-foreground">· {moduleId} · {String(m.crop)}</span>
+            <span className="text-sm font-normal text-muted-foreground">· {moduleId} · {m.crop ? String(m.crop) : "libre"}</span>
           </h1>
         </div>
         {retired && <Badge variant="outline">retirado</Badge>}
@@ -215,21 +215,32 @@ export function ModuloDetallePage() {
         </Card>
       </div>
 
-      {/* Perfil de cultivo */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Perfil de cultivo: {String(m.crop)}</CardTitle>
-          <CardDescription>rangos objetivo — solo cambian con aprobación humana (ADR-0019)</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-2 sm:grid-cols-3 text-sm">
-          <RangeRow label="EC" min={m.ec_min as number | null} max={m.ec_max as number | null} unit="mS/cm" />
-          <RangeRow label="pH" min={m.ph_min as number | null} max={m.ph_max as number | null} />
-          <RangeRow label="Temp. agua" min={m.water_temp_min as number | null} max={m.water_temp_max as number | null} unit="°C" />
-          {typeof m.crop_notes === "string" && m.crop_notes && (
-            <p className="text-xs text-muted-foreground sm:col-span-3 pt-1">{m.crop_notes}</p>
-          )}
-        </CardContent>
-      </Card>
+      {/* Perfil de cultivo: solo si la mesa tiene lote activo (ADR-0025) */}
+      {m.crop ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Perfil de cultivo: {String(m.crop)}</CardTitle>
+            <CardDescription>rangos objetivo — solo cambian con aprobación humana (regla 9)</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 sm:grid-cols-3 text-sm">
+            <RangeRow label="EC" min={m.ec_min as number | null} max={m.ec_max as number | null} unit="mS/cm" />
+            <RangeRow label="pH" min={m.ph_min as number | null} max={m.ph_max as number | null} />
+            <RangeRow label="Temp. agua" min={m.water_temp_min as number | null} max={m.water_temp_max as number | null} unit="°C" />
+            {typeof m.crop_notes === "string" && m.crop_notes && (
+              <p className="text-xs text-muted-foreground sm:col-span-3 pt-1">{m.crop_notes}</p>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Mesa libre</CardTitle>
+            <CardDescription>
+              sin lote activo — no hay cultivo ni rangos objetivo; abre un lote desde Producción para cultivar esta mesa
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       <p className="text-xs text-muted-foreground">
         análisis histórico profundo en <a className="underline text-primary" href="http://localhost:3001" target="_blank" rel="noreferrer">Grafana ↗</a>

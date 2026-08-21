@@ -24,8 +24,15 @@ import { timeAgo, formatMetric } from "@/lib/format.ts";
 import { useTenant } from "@/components/tenant-provider.tsx";
 
 type ModuleRow = {
-  tenant: string; id: string; name: string | null; crop: string; retired_at: string | null;
+  tenant: string; id: string; name: string | null; crop: string | null; retired_at: string | null;
+  occupied_by?: string | null; lote_crop?: string | null;
 };
+
+// ADR-0025: lo que se muestra es el cultivo del LOTE activo (verdad), no el caché;
+// mesa libre = sin lote → "libre", honesto.
+function cropLabel(m: ModuleRow): string {
+  return m.occupied_by ? `${m.lote_crop ?? m.crop ?? "?"} · ${m.occupied_by}` : "libre";
+}
 
 export function ModulosPage() {
   const { active, farmName } = useTenant();
@@ -118,7 +125,7 @@ function RetiredCard({ m }: { m: ModuleRow }) {
             <CardTitle className="text-base">{m.name ?? m.id}</CardTitle>
             <Badge variant="outline">retirado</Badge>
           </div>
-          <CardDescription>{m.id} · {m.crop}</CardDescription>
+          <CardDescription>{m.id} · {cropLabel(m)}</CardDescription>
         </CardHeader>
       </Card>
     </Link>
@@ -145,7 +152,7 @@ function ModuleCard({ m, field, live }: {
             <CardTitle className="text-base">{m.name ?? m.id}</CardTitle>
             <Badge variant={healthVariant(health?.state)}>{health?.state ?? "—"}</Badge>
           </div>
-          <CardDescription>{m.id} · {m.crop}{lastReading ? ` · dato ${timeAgo(lastReading)}` : " · sin telemetría"}</CardDescription>
+          <CardDescription>{m.id} · {cropLabel(m)}{lastReading ? ` · dato ${timeAgo(lastReading)}` : " · sin telemetría"}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div>
@@ -171,29 +178,22 @@ function NuevoModuloDialog() {
   const { active, tenants } = useTenant();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [crop, setCrop] = useState("");
   const [farmId, setFarmId] = useState("");
-
-  const { data: crops } = useQuery({
-    queryKey: ["modules.crops"],
-    queryFn: () => trpc.modules.crops.query()
-  });
 
   // Finca destino: la activa en el selector, o la elegida en el diálogo (modo Todas)
   const targetFarm = active ?? farmId;
 
   const createMut = useMutation({
-    mutationFn: () => trpc.modules.create.mutate({ tenant: targetFarm, name: name.trim(), crop }),
+    mutationFn: () => trpc.modules.create.mutate({ tenant: targetFarm, name: name.trim() }),
     onSuccess: (result) => {
       const mod = (result as { module?: { id: string } } | undefined)?.module;
       toast.success("Módulo creado", {
-        description: `${mod?.id ?? ""} "${name.trim()}" — vincula su fierro desde el detalle del módulo`
+        description: `${mod?.id ?? ""} "${name.trim()}" — libre; abre un lote desde Producción para ponerle cultivo`
       });
       queryClient.invalidateQueries({ queryKey: ["modules.list"] });
       queryClient.invalidateQueries({ queryKey: ["overview.kpis"] });
       setOpen(false);
       setName("");
-      setCrop("");
       setFarmId("");
     },
     onError: (err) => {
@@ -201,7 +201,7 @@ function NuevoModuloDialog() {
     }
   });
 
-  const valid = name.trim().length > 0 && crop.length > 0 && targetFarm.length > 0;
+  const valid = name.trim().length > 0 && targetFarm.length > 0;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -212,7 +212,8 @@ function NuevoModuloDialog() {
         <DialogHeader>
           <DialogTitle>Nuevo módulo</DialogTitle>
           <DialogDescription>
-            Unidad lógica de cultivo. El id técnico (mod-N) se autogenera; el nombre es libre y
+            Una mesa (infraestructura fungible). Nace LIBRE, sin cultivo: el cultivo lo pone
+            el lote al abrirse desde Producción. El id técnico (mod-N) se autogenera; el nombre
             aparece en la PWA, Home Assistant (área) y el reporte del cerebro.
           </DialogDescription>
         </DialogHeader>
@@ -238,17 +239,6 @@ function NuevoModuloDialog() {
               placeholder="Mesa Norte"
               autoFocus
             />
-          </label>
-          <label className="block space-y-1">
-            <span className="text-xs font-medium">Cultivo</span>
-            <select
-              value={crop}
-              onChange={(e) => setCrop(e.target.value)}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-            >
-              <option value="" disabled>elige cultivo…</option>
-              {(crops ?? []).map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
           </label>
         </div>
         <DialogFooter>

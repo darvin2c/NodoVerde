@@ -49,7 +49,13 @@ console.log(`[physics] start speed=${speed} seed=${seed} scenario=${scenarioName
 
 // --- load config ---
 const finca = loadFinca();
-const crops = loadAllCrops(finca);
+// ADR-0025: los objetivos del cultivo viven en crop_profiles (DB, escritos desde la
+// PWA). El yaml solo precarga targets de laboratorio; la verdad la empuja el
+// supervisor desde la DB con cada sync de lotes.
+type CropTargets2 = { ec_target: [number, number]; ph_target: [number, number] };
+const crops = new Map<string, CropTargets2>(
+  [...loadAllCrops(finca).entries()].map(([k, c]) => [k, { ec_target: c.ec_target, ph_target: c.ph_target }])
+);
 let scenario: Scenario = loadScenario(scenarioName);
 console.log(`[physics] mundo: nodes=${finca.modules.map((m) => m.hw_id).join(",")}`);
 
@@ -80,8 +86,8 @@ if (persisted) {
   // (el estado no puede ganarle silenciosamente al YAML, fuente de verdad)
   for (const m of finca.modules) {
     if (!modules.some((x) => x.id === m.hw_id)) {
-      const crop = crops.get(m.crop);
-      modules.push(createInitialModule(m.hw_id, m.crop, crop?.ec_target ?? [1.2, 2.0]));
+      const crop = m.crop ? crops.get(m.crop) : undefined;
+      modules.push(createInitialModule(m.hw_id, m.crop ?? null, crop?.ec_target ?? [1.2, 2.0]));
       console.log(`[physics] nodo declarado ausente en estado restaurado: ${m.hw_id} — agregado`);
     }
   }
@@ -91,8 +97,8 @@ if (persisted) {
   simClock = new SimClock(initialMs, speed);
   startMs = initialMs;
   modules = finca.modules.map((m) => {
-    const crop = crops.get(m.crop);
-    return createInitialModule(m.hw_id, m.crop, crop?.ec_target ?? [1.2, 2.0]);
+    const crop = m.crop ? crops.get(m.crop) : undefined;
+    return createInitialModule(m.hw_id, m.crop ?? null, crop?.ec_target ?? [1.2, 2.0]);
   });
 }
 
@@ -267,7 +273,7 @@ function nodeState(hwId: string): Record<string, unknown> | null {
   if (!mod) return null;
   const nowSim = simClock.nowSim();
   const w = weatherAt(weather, nowSim - startMs);
-  const crop = crops.get(mod.crop);
+  const crop = mod.crop ? crops.get(mod.crop) : undefined;
   const faults: string[] = [];
   if (deadSensor && deadSensor.hwId === hwId && nowSim - startMs >= deadSensor.afterSimSec * 1000) {
     faults.push(deadSensor.device);
@@ -280,24 +286,42 @@ function nodeState(hwId: string): Record<string, unknown> | null {
     elapsedDays: (nowSim - startMs) / 86_400_000,
     state: mod,
     weather: { airTemp: w.airTemp, humidity: w.humidity },
-    cropTargets: crop ? { ec: crop.ec_target, ph: crop.ph_target } : { ec: [1.2, 2.0], ph: [5.8, 6.3] },
+    // ADR-0025: mesa libre → sin objetivos (null honesto); el emulador no auto-dosifica
+    cropTargets: crop ? { ec: crop.ec_target, ph: crop.ph_target } : null,
     disableAutoDose: scenario.disable_auto_dose ?? false,
     deadDevices: faults,
     offs: (offLog.get(hwId) ?? []).slice(-20),
     doserMlPerSecond: DEFAULT_PARAMS.doserMlPerSecond,
   };
 }
-function addNode(hwId: string, crop: string): Record<string, unknown> {
+function addNode(hwId: string): Record<string, unknown> {
   if (!/^[0-9a-f]{12}$/.test(hwId)) throw new Error(`hw_id inválido: ${hwId}`);
   if (modules.some((m) => m.id === hwId)) throw new Error(`nodo ya existe: ${hwId}`);
-  if (!crops.has(crop)) {
-    // cultivo no declarado en el mundo: cargar perfil bajo demanda (la planta existe físicamente)
-    crops.set(crop, loadCrop(crop));
-  }
-  const c = crops.get(crop)!;
-  modules.push(createInitialModule(hwId, crop, c.ec_target));
+  // ADR-0025: la mesa nace LIBRE — sin plantas hasta que un lote la ocupe
+  modules.push(createInitialModule(hwId, null, [1.2, 2.0]));
   offLog.delete(hwId); // nodo nuevo: sin historia de apagados de encarnaciones anteriores
-  return { hw_id: hwId, crop };
+  return { hw_id: hwId, crop: null };
+}
+
+// ADR-0025: el supervisor sincroniza el cultivo desde los lotes abiertos (DB).
+// Abrir lote = plantas llegan a la mesa; cerrar lote = cosecha, mesa libre.
+// Los targets vienen de crop_profiles (DB) en el payload — el yaml es solo
+// fallback de laboratorio offline.
+function setCrop(hwId: string, crop: string | null, targets?: { ec?: [number, number]; ph?: [number, number] } | null): Record<string, unknown> {
+  const mod = modules.find((m) => m.id === hwId);
+  if (!mod) throw new Error(`nodo no existe: ${hwId}`);
+  if (crop !== null) {
+    if (!/^[a-z0-9_]+$/.test(crop)) throw new Error(`crop inválido: ${crop}`);
+    if (targets?.ec && targets?.ph) {
+      crops.set(crop, { ec_target: targets.ec, ph_target: targets.ph });
+    } else if (!crops.has(crop)) {
+      const c = loadCrop(crop); // fallback yaml (laboratorio sin DB)
+      crops.set(crop, { ec_target: c.ec_target, ph_target: c.ph_target });
+    }
+  }
+  mod.crop = crop;
+  console.log(`[physics] ${hwId}: cultivo → ${crop ?? "LIBRE (sin lote)"}`);
+  return { hw_id: hwId, crop: mod.crop };
 }
 
 function removeNode(hwId: string): boolean {
@@ -317,6 +341,7 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify(body));
   };
   const nodeMatch = url.pathname.match(/^\/api\/nodes\/([0-9a-f]{12})(\/state|\/actuate)?$/);
+  const cropMatch = url.pathname.match(/^\/api\/nodes\/([0-9a-f]{12})\/crop$/);
 
   if (req.method === "GET" && url.pathname === "/api/nodes") {
     return send(200, { nodes: modules.map((m) => ({ hw_id: m.id, crop: m.crop })), ts: simClock.nowSim() });
@@ -342,8 +367,22 @@ const server = createServer((req, res) => {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       try {
-        const { hw_id, crop } = JSON.parse(body);
-        send(201, addNode(hw_id, crop));
+        const { hw_id } = JSON.parse(body);
+        send(201, addNode(hw_id));
+      } catch (e) {
+        send(400, { error: String(e) });
+      }
+    });
+    return;
+  }
+  if (req.method === "POST" && cropMatch) {
+    // sync de cultivo desde lotes (lo llama el supervisor; jamás el producto)
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      try {
+        const { crop, targets } = JSON.parse(body);
+        send(200, setCrop(cropMatch[1], crop ?? null, targets ?? null));
       } catch (e) {
         send(400, { error: String(e) });
       }

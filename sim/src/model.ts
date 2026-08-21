@@ -20,7 +20,9 @@ export function gaussian(rng: () => number): number {
 // --- Types ---
 export type ModuleState = {
   id: string;
-  crop: string;
+  // ADR-0025: null = mesa LIBRE (sin lote activo) — no hay plantas:
+  // la física no consume nutrientes ni deriva pH por absorción.
+  crop: string | null;
   ec: number; // mS/cm
   ph: number;
   waterTemp: number; // C
@@ -67,7 +69,7 @@ export const DEFAULT_PARAMS: SimParams = {
   doserMlPerSecond: 1.5,
 };
 
-export function createInitialModule(id: string, crop: string, ecTarget: [number, number]): ModuleState {
+export function createInitialModule(id: string, crop: string | null, ecTarget: [number, number]): ModuleState {
   const ecMid = (ecTarget[0] + ecTarget[1]) / 2;
   return {
     id,
@@ -137,17 +139,21 @@ export function stepModule(
   const hour = ((simMs / 3_600_000) % 24 + 24) % 24;
   const rad = radiationFactor(hour);
 
+  // ADR-0025: sin lote (crop null) no hay plantas — no hay consumo biológico.
+  // La mesa libre mantiene EC estable (solo evaporación concentra levemente).
+  const hasPlants = state.crop !== null;
+
   // EC consumption durante fotoperiodo
   const consMul = scenario?.ecConsumptionMul ?? 1;
-  const consumption = params.ecConsumptionPeak * rad * dtHours * consMul;
+  const consumption = hasPlants ? params.ecConsumptionPeak * rad * dtHours * consMul : 0;
   next.ec -= consumption;
 
   // evaporación: sube leve cuando tanque baja
   const evap = params.ecEvapCoeff * ((100 - next.tankLevel) / 100) * dtHours;
   next.ec += evap;
 
-  // pH deriva hacia arriba con consumo (proporcional a rad)
-  next.ph += params.phDriftPerHour * (0.3 + 0.7 * rad) * dtHours;
+  // pH deriva hacia arriba con consumo (proporcional a rad); sin plantas no deriva
+  if (hasPlants) next.ph += params.phDriftPerHour * (0.3 + 0.7 * rad) * dtHours;
 
   // mezcla gradual: la dosis encolada se incorpora linealmente en ~mixTauSec
   if (next.pendingEc !== 0) {

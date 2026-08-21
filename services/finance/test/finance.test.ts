@@ -215,13 +215,18 @@ describe("cost_summary — shaping group_by", () => {
     expect(sql).toMatch(/GROUP BY m\.category/);
   });
 
-  it("group_by crop hace JOIN modules", async () => {
+  it("group_by crop resuelve cultivo por ventana del lote (ADR-0025), no por modules.crop", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ grp: "lechuga", gasto: "50", ingreso: "200" }] } as never);
     const rows = await costSummaryDb({ tenant: "demo", group_by: "crop" });
     expect(rows[0].group).toBe("lechuga");
     const sql: string = mockQuery.mock.calls[0][0] as string;
-    expect(sql).toMatch(/JOIN modules/);
-    expect(sql).toMatch(/mod\.crop/);
+    // El cultivo viene del lote vigente en el instante del movimiento; mesa sin
+    // lote en ese momento → 'sin_lote'. NO usa modules.crop (caché volátil).
+    expect(sql).toMatch(/FROM lotes l/);
+    expect(sql).toMatch(/l\.started_at <= m\.ts/);
+    expect(sql).toMatch(/l\.closed_at IS NULL OR m\.ts <= l\.closed_at/);
+    expect(sql).toMatch(/'sin_lote'/);
+    expect(sql).not.toMatch(/JOIN modules/);
   });
 
   it("group_by module desagrega por attribution pct", async () => {

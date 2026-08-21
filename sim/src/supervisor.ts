@@ -81,8 +81,10 @@ async function spawnNode(hwId: string): Promise<void> {
 }
 
 // --- claiming: el acto del dueño (stand-in del chat hasta Fase 2) ---
-async function claim(hwId: string, crop: string): Promise<{ tenant: string; module: string }> {
-  // módulo libre = existe como config de cultivo pero NINGÚN hardware lo ocupa;
+// ADR-0025: claiming solo amarra fierro ↔ mesa. El cultivo JAMÁS se escribe aquí:
+// es caché del ciclo del lote (lo pone open_batch vía MCP, lo limpia close_batch).
+async function claim(hwId: string): Promise<{ tenant: string; module: string }> {
+  // módulo libre = existe pero NINGÚN hardware lo ocupa;
   // se toma el de menor número (rellena huecos); si no hay, se crea el siguiente
   const { rows: free } = await pool.query(
     `SELECT m.id FROM modules m
@@ -94,7 +96,6 @@ async function claim(hwId: string, crop: string): Promise<{ tenant: string; modu
   let moduleId: string;
   if (free.length) {
     moduleId = free[0].id;
-    await pool.query("UPDATE modules SET crop = $3 WHERE tenant = $1 AND id = $2", [tenant, moduleId, crop]);
   } else {
     const { rows } = await pool.query(
       `SELECT id FROM (SELECT id FROM modules WHERE tenant = $1
@@ -103,13 +104,55 @@ async function claim(hwId: string, crop: string): Promise<{ tenant: string; modu
     );
     const nums = rows.map((r: { id: string }) => parseInt(r.id.replace("mod-", ""), 10)).filter((n: number) => !isNaN(n));
     moduleId = nextModuleId(nums);
-    await pool.query("INSERT INTO modules (tenant, id, crop) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [tenant, moduleId, crop]);
+    await pool.query("INSERT INTO modules (tenant, id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [tenant, moduleId]);
   }
   await pool.query(
     "INSERT INTO device_identities (hw_id, tenant, module, claimed_by) VALUES ($1, $2, $3, 'ctl') ON CONFLICT (hw_id) DO UPDATE SET tenant = $2, module = $3, claimed_by = 'ctl'",
     [hwId, tenant, moduleId],
   );
   return { tenant, module: moduleId };
+}
+
+// --- sync de cultivos desde lotes (ADR-0025): la única vía del cultivo al mundo ---
+// Abrir lote (MCP) → plantas en la mesa; cerrar lote → cosecha, mesa libre.
+// El mundo físico no adivina: el supervisor lee la verdad (lotes abiertos) y se
+// la empuja al motor. Poll de 5s: la biología no cambia más rápido que eso.
+async function syncCropsFromBatches(): Promise<void> {
+  const { rows } = await pool.query(
+    `SELECT d.hw_id, l.crop
+     FROM device_identities d
+     LEFT JOIN LATERAL (
+       SELECT lo.crop FROM lotes lo
+       WHERE lo.tenant = d.tenant AND lo.state = 'open' AND lo.modules ? d.module
+       ORDER BY lo.started_at DESC LIMIT 1
+     ) l ON true
+     WHERE d.tenant = $1`,
+    [tenant],
+  );
+  const world = (await (await fetch(`${physicsUrl}/api/nodes`)).json()) as { nodes: { hw_id: string; crop: string | null }[] };
+  const current = new Map(world.nodes.map((n) => [n.hw_id, n.crop]));
+  // targets desde crop_profiles (DB) — el perfil se ingresa en la PWA, no en yaml
+  const desiredCrops = [...new Set((rows as { crop: string | null }[]).map((r) => r.crop).filter((c): c is string => !!c))];
+  const targets = new Map<string, { ec: [number, number]; ph: [number, number] }>();
+  for (const c of desiredCrops) {
+    const { rows: pr } = await pool.query(
+      "SELECT ec_min, ec_max, ph_min, ph_max FROM crop_profiles WHERE name = $1", [c]);
+    const p = pr[0] as { ec_min: number; ec_max: number; ph_min: number; ph_max: number } | undefined;
+    if (p) targets.set(c, { ec: [Number(p.ec_min), Number(p.ec_max)], ph: [Number(p.ph_min), Number(p.ph_max)] });
+  }
+  for (const row of rows as { hw_id: string; crop: string | null }[]) {
+    const desired = row.crop ?? null;
+    if (current.get(row.hw_id) !== desired) {
+      const res = await fetch(`${physicsUrl}/api/nodes/${row.hw_id}/crop`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ crop: desired, targets: desired ? targets.get(desired) ?? null : null }),
+      }).catch((e) => { console.error(`[supervisor] sync crop ${row.hw_id} falló:`, e); return null; });
+      if (res && !res.ok) {
+        console.error(`[supervisor] sync crop ${row.hw_id} rechazado:`, await res.text());
+      }
+    }
+  }
 }
 
 async function unclaim(hwId: string): Promise<void> {
@@ -146,19 +189,19 @@ const server = createServer((req, res) => {
       try {
         const world = (await (await fetch(`${physicsUrl}/api/nodes`)).json()) as { nodes: { hw_id: string }[] };
         const hwId = b.hw_id ?? nextHwId(world.nodes.map((n) => n.hw_id));
-        const crop = b.crop ?? "lechuga";
         if (children.has(hwId) || world.nodes.some((n) => n.hw_id === hwId)) {
           return send(409, { error: `nodo ya existe: ${hwId}` });
         }
+        // ADR-0025: add-node crea mesa LIBRE (sin cultivo) — el lote la ocupa luego
         const addRes = await fetch(`${physicsUrl}/api/nodes`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ hw_id: hwId, crop }),
+          body: JSON.stringify({ hw_id: hwId }),
         });
         if (!addRes.ok) return send(addRes.status, await addRes.json());
-        const claimed = await claim(hwId, crop);
+        const claimed = await claim(hwId);
         await spawnNode(hwId);
-        send(201, { hw_id: hwId, ...claimed, crop });
+        send(201, { hw_id: hwId, ...claimed, crop: null });
       } catch (e) {
         send(400, { error: String(e) });
       }
@@ -217,6 +260,11 @@ await provisionTenant();
 spawnChild("physics", "src/physics/engine.ts", []);
 await waitPhysics();
 for (const m of finca.modules) await spawnNode(m.hw_id);
+// sync inicial de cultivos desde lotes abiertos + poll cada 5s (ADR-0025)
+await syncCropsFromBatches().catch((e) => console.error("[supervisor] sync crop inicial falló:", e));
+const cropSync = setInterval(() => {
+  syncCropsFromBatches().catch((e) => console.error("[supervisor] sync crop falló:", e));
+}, 5000);
 server.listen(port, "127.0.0.1", () => console.log(`[supervisor] ctl http://127.0.0.1:${port}/ctl/status`));
 
 async function shutdown(signal: string) {

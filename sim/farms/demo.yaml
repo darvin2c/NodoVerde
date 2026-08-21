@@ -19,11 +19,9 @@ location: # ubicación para ET0 y dashboards
   tz: America/Lima # IANA — se provisiona a tenants.tz (reportes en hora local)
 tank_liters: 200 # litros por tanque de módulo
 modules: # 4 nodos del piloto Fase 0 (hw_ids determinísticos)
+  # ADR-0025: las mesas nacen LIBRES (sin cultivo). El cultivo lo pone el LOTE
+  # al abrirse (MCP open_batch → supervisor sincroniza al motor de física).
   - hw_id: "020000000001" # nodo 1
-    crop: lechuga # ref: sim/config/crops/lechuga.yaml
   - hw_id: "020000000002" # nodo 2
-    crop: lechuga
   - hw_id: "020000000003" # nodo 3
-    crop: tomate # ref: sim/config/crops/tomate.yaml
   - hw_id: "020000000004" # nodo 4
-    crop: lechuga

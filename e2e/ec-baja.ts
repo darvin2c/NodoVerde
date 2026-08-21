@@ -23,6 +23,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const MQTT_URL = process.env.MQTT_URL ?? "mqtt://localhost:1883";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://terra:changeme@localhost:5432/terra";
 const POLICY_URL = process.env.POLICY_URL ?? "http://localhost:7762";
+const DOMAIN_URL = process.env.DOMAIN_URL ?? "http://localhost:7760";
 const POLICY_ADMIN_TOKEN = process.env.POLICY_ADMIN_TOKEN ?? "dev-admin-token";
 const CTL_URL = process.env.CTL_URL ?? "http://127.0.0.1:7750";
 const TENANT = "demo";
@@ -133,6 +134,36 @@ async function main(): Promise<void> {
       }
     } catch { /* tolerante */ }
   });
+
+  // ── 0.5. ADR-0025: sin lote abierto no hay plantas ni consumo — abrir uno ──
+  // El cultivo ya NO vive en el yaml ni en los seeds: lo pone el lote (camino
+  // real del humano en la PWA). Si ya hay lote abierto con lechuga, se reusa.
+  const domain = new Client({ name: "terra-e2e-domain", version: "0.1.0" });
+  await domain.connect(new StreamableHTTPClientTransport(new URL(`${DOMAIN_URL}/mcp`)));
+  let openedByUs: string | null = null;
+  {
+    const existing = await db.query(
+      `SELECT l.id FROM lotes l WHERE l.tenant=$1 AND l.state='open' AND l.crop='lechuga' LIMIT 1`,
+      [TENANT],
+    );
+    if (existing.rows.length === 0) {
+      const allMods = await db.query(`SELECT id FROM modules WHERE tenant=$1 AND retired_at IS NULL ORDER BY id`, [TENANT]);
+      const moduleIds = allMods.rows.map((r) => r.id as string);
+      if (moduleIds.length === 0) fail("sin módulos en DB — el supervisor debió clamarlos al arrancar");
+      const out = await domain.callTool({
+        name: "open_batch",
+        arguments: { tenant: TENANT, crop: "lechuga", modules: moduleIds, campaign: "e2e", note: "lote E2E ec-baja" },
+      });
+      const sc = (out as { structuredContent?: { batch?: { id?: string }; error?: string } }).structuredContent;
+      if (sc?.error || !sc?.batch?.id) fail(`open_batch falló: ${JSON.stringify(sc)}`);
+      openedByUs = sc.batch.id;
+      ok(`lote abierto (${moduleIds.join("/")} ← lechuga) — las mesas tienen plantas`);
+      // el supervisor sincroniza cultivo → física cada 5s; esperar a que el mundo tenga plantas
+      await sleep(7_000);
+    } else {
+      info(`lote lechuga ya abierto (${existing.rows[0].id}) — se reusa, no se cierra al final`);
+    }
+  }
 
   // ── 1. Escenario ec_baja (auto-dosis del firmware OFF → el agente debe cerrar el lazo) ──
   await setScenario("ec_baja");
@@ -308,6 +339,15 @@ async function main(): Promise<void> {
 
   // ── Cierre ───────────────────────────────────────────────────────────────
   await setScenario("normal");
+  if (openedByUs) {
+    // ADR-0025: cerrar el lote que abrimos — las mesas vuelven a estar libres
+    await domain.callTool({
+      name: "close_batch",
+      arguments: { id: openedByUs, reason: "otro", note: "cierre E2E ec-baja" },
+    }).catch(() => {});
+    ok(`lote E2E cerrado — mesas libres de nuevo`);
+  }
+  await domain.close().catch(() => {});
   await mcp.close().catch(() => {});
   bus.end();
   await db.end();

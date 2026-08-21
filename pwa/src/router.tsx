@@ -8,6 +8,7 @@ import { FinanzasPage } from "./routes/finanzas.tsx";
 import { AprobacionesPage } from "./routes/aprobaciones.tsx";
 import { CamarasPage } from "./routes/camaras.tsx";
 import { ProduccionPage } from "./routes/produccion.tsx";
+import { PerfilesPage } from "./routes/perfiles.tsx";
 import { FincasPage } from "./routes/fincas.tsx";
 import { SistemaPage } from "./routes/sistema.tsx";
 
@@ -22,6 +23,7 @@ const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/aprobaciones", component: AprobacionesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/camaras", component: CamarasPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/produccion", component: ProduccionPage }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/perfiles", component: PerfilesPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/fincas", component: FincasPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/sistema", component: SistemaPage })
 ]);

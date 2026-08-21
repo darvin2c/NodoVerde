@@ -42,9 +42,9 @@ export function resolveAlert(args: {
   return callDomainTool("resolve_alert", args);
 }
 
-// — Provisionamiento de módulos (ADR-0022) —
+// — Provisionamiento de módulos (ADR-0022/0025: la mesa nace libre, sin cultivo) —
 
-export function createModule(args: { tenant: string; name: string; crop: string }): Promise<unknown> {
+export function createModule(args: { tenant: string; name: string }): Promise<unknown> {
   return callDomainTool("create_module", args);
 }
 
@@ -52,9 +52,38 @@ export function updateModule(args: {
   tenant: string;
   module: string;
   name?: string;
-  crop?: string;
 }): Promise<unknown> {
   return callDomainTool("update_module", args);
+}
+
+// — Perfiles de cultivo (ADR-0025, regla 9: solo humano vía PWA) —
+
+export function createCropProfile(args: {
+  name: string;
+  ec_min: number;
+  ec_max: number;
+  ph_min: number;
+  ph_max: number;
+  water_temp_min: number;
+  water_temp_max: number;
+  cycle_days?: number;
+  notes?: string;
+}): Promise<unknown> {
+  return callDomainTool("create_crop_profile", args);
+}
+
+export function updateCropProfile(args: {
+  name: string;
+  ec_min?: number;
+  ec_max?: number;
+  ph_min?: number;
+  ph_max?: number;
+  water_temp_min?: number;
+  water_temp_max?: number;
+  cycle_days?: number | null;
+  notes?: string | null;
+}): Promise<unknown> {
+  return callDomainTool("update_crop_profile", args);
 }
 
 export function retireModule(args: { tenant: string; module: string }): Promise<unknown> {

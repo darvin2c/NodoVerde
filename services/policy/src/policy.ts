@@ -159,6 +159,30 @@ export async function proposeAction(input: ProposeInput): Promise<ProposeResult>
     return { status: "rejected", reason: `módulo no existe: ${tenant}/${mod}`, action_id: row?.id, policy_id: row?.policy_id ?? policyId };
   }
 
+  // ADR-0025: actuación BIOLÓGICA (dosificar nutriente/pH) exige lote activo.
+  // Mesa libre (crop null = sin lote) → rechazo honesto: no hay cultivo que
+  // alimentar. La infraestructura (bomba/válvula) sigue libre para mantenimiento,
+  // y stop/OFF siempre pasa (apagar es seguro).
+  const biological = actionClass === "dose_nutrient" || actionClass === "dose_ph";
+  if (biological && energizes && modInfo.crop === null) {
+    const policyId = `pol-${randomUUID()}`;
+    const reason = `no_active_batch: ${mod} está libre (sin lote activo) — no se dosifica sin cultivo`;
+    const row = await insertActionRequest({
+      tenant,
+      module: mod,
+      device,
+      action: normAction,
+      params: normParams,
+      action_class: actionClass,
+      source,
+      requested_by: requestedBy,
+      reason: auditReason(reason),
+      status: "rejected",
+      confidence: null,
+    }).catch(() => null);
+    return { status: "rejected", reason, action_id: row?.id, policy_id: row?.policy_id ?? policyId };
+  }
+
   // snapshots para decision
   const healthState = getHealth(tenant, mod);
   const confEntry = getConfidence(tenant, mod);
@@ -185,14 +209,13 @@ export async function proposeAction(input: ProposeInput): Promise<ProposeResult>
     return { status: "rejected", reason: hres.reason, action_id: row.id, policy_id: row.policy_id };
   }
 
-  // 5. techo duro (solo acciones que energizan)
+  // 5. techo duro (solo acciones que energizan; rangos null si mesa libre —
+  //    checkHardCeiling ya tolera crop null, y el techo de nivel no depende del cultivo)
   const ceiling = energizes
-    ? checkHardCeiling(actionClass as ActionClass, readings, {
-        ec_min: modInfo.ec_min,
-        ec_max: modInfo.ec_max,
-        ph_min: modInfo.ph_min,
-        ph_max: modInfo.ph_max,
-      })
+    ? checkHardCeiling(actionClass as ActionClass, readings,
+        modInfo.crop === null
+          ? null
+          : { ec_min: modInfo.ec_min!, ec_max: modInfo.ec_max!, ph_min: modInfo.ph_min!, ph_max: modInfo.ph_max! })
     : ({ ok: true } as const);
   if (!ceiling.ok) {
     const row = await insertActionRequest({
@@ -387,6 +410,17 @@ export async function approveAction(
   const modInfo = await getModuleWithCrop(tenant, mod);
   if (!modInfo) return { status: "rejected", reason: `módulo no existe` };
 
+  const rowParams = (row.params ?? {}) as Record<string, unknown>;
+  const rowEnergizes = row.action === "start" || (row.action === "set" && rowParams.v === "ON");
+
+  // ADR-0025: si el lote cerró mientras la acción esperaba aprobación, la mesa
+  // quedó libre → la dosificación pendiente ya no tiene cultivo. Rechazo honesto.
+  const biological = actionClass === "dose_nutrient" || actionClass === "dose_ph";
+  if (biological && rowEnergizes && modInfo.crop === null) {
+    await decideAction(id, "rejected", decidedBy).catch(() => {});
+    return { status: "rejected", reason: `no_active_batch: ${mod} quedó libre mientras esperaba aprobación — no se dosifica sin cultivo` };
+  }
+
   // re-validar health
   const healthState = getHealth(tenant, mod);
   const hres = checkHealth(healthState ?? null);
@@ -398,8 +432,6 @@ export async function approveAction(
   }
 
   // rate limit re-check — solo acciones que energizan (start / set ON); stop/OFF siempre pasan
-  const rowParams = (row.params ?? {}) as Record<string, unknown>;
-  const rowEnergizes = row.action === "start" || (row.action === "set" && rowParams.v === "ON");
   const last = rowEnergizes ? await lastExecutedAt(tenant, mod, actionClass) : null;
   if (last) {
     const elapsed = Date.now() - last.getTime();
@@ -430,12 +462,10 @@ export async function approveAction(
 
     // techo duro re-check (por si lectura cambió)
     const readings = readingsForModule(tenant, mod);
-    const ceiling = checkHardCeiling(actionClass, readings, {
-      ec_min: modInfo.ec_min,
-      ec_max: modInfo.ec_max,
-      ph_min: modInfo.ph_min,
-      ph_max: modInfo.ph_max,
-    });
+    const ceiling = checkHardCeiling(actionClass, readings,
+      modInfo.crop === null
+        ? null
+        : { ec_min: modInfo.ec_min!, ec_max: modInfo.ec_max!, ph_min: modInfo.ph_min!, ph_max: modInfo.ph_max! });
     if (!ceiling.ok) {
       await decideAction(id, "rejected", decidedBy).catch(() => {});
       return { status: "rejected", reason: ceiling.reason };
