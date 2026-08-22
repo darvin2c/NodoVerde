@@ -8,6 +8,8 @@ status: aceptado
 supersedes: ADR-0005
 ---
 
+> **Nota (2026-08-21):** refinado por [ADR-0027](0027-captura-financiera-omnicanal.md): la imputación se guarda en montos (suma = total) en vez de porcentajes, con dos niveles de captura (finca general / módulos) y snapshot del lote activo por elemento; se añaden traza de procedencia, evidencia multi-archivo, `MOV-NNNN`/`external_ref` y edición por anulación+recreación. Lo demás de este ADR sigue vigente.
+
 # ADR-0011: Finanzas = registro simple de movimientos categorizados
 
 ## Contexto

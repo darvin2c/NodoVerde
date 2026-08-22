@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.tsx";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog.tsx";
@@ -27,7 +28,6 @@ type TenantRow = {
 const CURRENCIES = ["PEN", "USD", "EUR"] as const;
 type Currency = (typeof CURRENCIES)[number];
 
-const selectClass = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]";
 
 export function FincasPage() {
   const { data: tenants, isLoading } = useQuery({
@@ -184,9 +184,16 @@ function NuevaFincaDialog() {
             </label>
             <label className="space-y-1">
               <span className="text-xs text-muted-foreground">moneda</span>
-              <select value={currency} onChange={(e) => setCurrency(e.target.value as Currency)} className={selectClass}>
-                {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+              <Select
+                items={CURRENCIES.map((c) => ({ label: c, value: c }))}
+                value={currency}
+                onValueChange={(v) => setCurrency(v as Currency)}
+              >
+                <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {CURRENCIES.map((c) => <SelectItem key={c} value={c} className="text-sm">{c}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </label>
           </div>
         </div>
@@ -258,9 +265,16 @@ function EditarFincaDialog({ t }: { t: TenantRow }) {
             </label>
             <label className="space-y-1">
               <span className="text-xs text-muted-foreground">moneda</span>
-              <select value={currency} onChange={(e) => setCurrency(e.target.value as Currency)} className={selectClass}>
-                {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+              <Select
+                items={CURRENCIES.map((c) => ({ label: c, value: c }))}
+                value={currency}
+                onValueChange={(v) => setCurrency(v as Currency)}
+              >
+                <SelectTrigger className="w-full h-9 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {CURRENCIES.map((c) => <SelectItem key={c} value={c} className="text-sm">{c}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </label>
           </div>
         </div>

@@ -4,6 +4,7 @@ import { Plus, Pencil, Leaf } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Button } from "@/components/ui/button.tsx";
@@ -85,8 +86,14 @@ export function PerfilesPage() {
         </div>
       ) : (profiles ?? []).length === 0 ? (
         <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            Sin perfiles todavía. Crea el primero para poder abrir lotes.
+          <CardContent>
+            <Empty className="border-0 py-8">
+              <EmptyHeader>
+                <EmptyMedia variant="icon"><Leaf /></EmptyMedia>
+                <EmptyTitle>Sin perfiles todavía</EmptyTitle>
+                <EmptyDescription>Crea el primero para poder abrir lotes.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           </CardContent>
         </Card>
       ) : (

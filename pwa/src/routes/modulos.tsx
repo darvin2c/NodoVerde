@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
+import { Plus, Boxes } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Progress } from "@/components/ui/progress.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.tsx";
 import {
   Dialog,
   DialogContent,
@@ -68,11 +70,19 @@ export function ModulosPage() {
       ) : activos.length === 0 && retirados.length === 0 ? (
         <Card>
           <CardHeader><CardTitle>Módulos</CardTitle></CardHeader>
-          <CardContent><p className="text-sm text-muted-foreground">
-            {active === null
-              ? "Sin módulos registrados — selecciona una finca y crea el primero con \"Nuevo módulo\"."
-              : `Sin módulos en ${farmName(active)} — crea el primero con "Nuevo módulo".`}
-          </p></CardContent>
+          <CardContent>
+            <Empty className="border-0 py-8">
+              <EmptyHeader>
+                <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
+                <EmptyTitle>{active === null ? "Sin módulos registrados" : `Sin módulos en ${farmName(active)}`}</EmptyTitle>
+                <EmptyDescription>
+                  {active === null
+                    ? "Selecciona una finca y crea el primero con \"Nuevo módulo\"."
+                    : "Crea el primero con \"Nuevo módulo\"."}
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          </CardContent>
         </Card>
       ) : groupByFarm ? (
         farmIds.map((farmId) => {
@@ -221,14 +231,16 @@ function NuevoModuloDialog() {
           {active === null && (
             <label className="block space-y-1">
               <span className="text-xs font-medium">Finca</span>
-              <select
+              <Select
+                items={tenants.map((t) => ({ label: t.name, value: t.id }))}
                 value={farmId}
-                onChange={(e) => setFarmId(e.target.value)}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                onValueChange={(v) => setFarmId(v as string)}
               >
-                <option value="" disabled>elige finca…</option>
-                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
+                <SelectTrigger className="w-full h-9 text-sm"><SelectValue placeholder="elige finca…" /></SelectTrigger>
+                <SelectContent>
+                  {tenants.map((t) => <SelectItem key={t.id} value={t.id} className="text-sm">{t.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </label>
           )}
           <label className="block space-y-1">

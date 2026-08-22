@@ -141,7 +141,7 @@ export function openBatch(args: {
   return callDomainTool("open_batch", args);
 }
 
-export function closeBatch(args: { id: string; reason: string; note?: string }): Promise<unknown> {
+export function closeBatch(args: { id: string; reason: string; yield_kg?: number; note?: string }): Promise<unknown> {
   return callDomainTool("close_batch", args);
 }
 

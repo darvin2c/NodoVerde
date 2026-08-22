@@ -46,9 +46,20 @@ const handler = createHTTPHandler({
 const server = http.createServer((req, res) => {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "content-type, trpc-accept");
+  res.setHeader("Access-Control-Allow-Headers", "content-type, trpc-accept, x-tenant, x-kind, x-note");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+  // Proxy de evidencia hacia services/finance (único dueño de MinIO/ledger, ADR-0027)
+  if (req.url === "/api/evidence" && req.method === "POST") {
+    void proxyEvidenceUpload(req, res);
+    return;
+  }
+  const evFile = (req.url ?? "").match(/^\/api\/evidence\/([0-9a-fA-F-]{36})\/file$/);
+  if (evFile && req.method === "GET") {
+    void proxyEvidenceFile(res, evFile[1]);
+    return;
+  }
 
   // tRPC handler
   if ((req.url ?? "").startsWith("/trpc")) {
@@ -58,6 +69,63 @@ const server = http.createServer((req, res) => {
   // Resto: frontend estático (producción)
   if (!serveStatic(req, res)) { res.writeHead(404).end(); }
 });
+
+const FINANCE_BASE = (process.env.MCP_FINANCE_URL ?? "http://localhost:7761/mcp").replace(/\/mcp$/, "");
+
+// Sube bytes tal cual al finance (máx 15 MB allá); la PWA añade canal/autor.
+async function proxyEvidenceUpload(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const tenant = req.headers["x-tenant"];
+  if (typeof tenant !== "string" || !tenant) {
+    res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: "x-tenant requerido" }));
+    return;
+  }
+  const kind = typeof req.headers["x-kind"] === "string" ? req.headers["x-kind"] : "otro";
+  const note = typeof req.headers["x-note"] === "string" ? (req.headers["x-note"] as string) : "";
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${FINANCE_BASE}/api/evidence`, {
+      method: "POST",
+      headers: {
+        "content-type": req.headers["content-type"] ?? "application/octet-stream",
+        "x-tenant": tenant,
+        "x-uploaded-by": "pwa",
+        "x-channel": "pwa",
+        "x-kind": kind,
+        ...(note ? { "x-note": note } : {})
+      },
+      body: req as never, // stream del request al upstream (Node fetch exige duplex half)
+      ...({ duplex: "half" } as Record<string, unknown>)
+    });
+  } catch (err) {
+    res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ error: "finance inalcanzable", message: String(err) }));
+    return;
+  }
+  const body = await upstream.text();
+  res.writeHead(upstream.status, { "content-type": "application/json" }).end(body);
+}
+
+async function proxyEvidenceFile(res: http.ServerResponse, id: string): Promise<void> {
+  try {
+    const upstream = await fetch(`${FINANCE_BASE}/api/evidence/${id}/file`);
+    if (!upstream.ok || !upstream.body) {
+      res.writeHead(upstream.status).end();
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
+      "cache-control": "private, max-age=3600"
+    });
+    const reader = (upstream.body as unknown as ReadableStream<Uint8Array>).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch {
+    if (!res.headersSent) res.writeHead(502).end();
+  }
+}
 
 server.listen(PORT, () => {
   // eslint-disable-next-line no-console

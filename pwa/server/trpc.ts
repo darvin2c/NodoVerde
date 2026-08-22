@@ -8,6 +8,60 @@ import { mqttBus, shapeConfidence, shapeHealth } from "./mqtt.js";
 import type { ConfidencePayload, HealthPayload } from "./mqtt.js";
 import { fetchJson, PolicyError } from "./policy.js";
 import { resolveAlert, createModule, updateModule, retireModule, claimDevice, createTenant, updateTenant, archiveTenant, openBatch, closeBatch, removeModuleFromBatch, createCropProfile, updateCropProfile } from "./mcpDomain.js";
+import { registerMovement, voidMovement, editMovement, attachEvidence } from "./mcpFinance.js";
+
+// Filtros compartidos de finanzas (ADR-0027 addendum): un solo zod, SQL componible.
+const financeFilters = z.object({
+  tenant: z.string().optional(),
+  kind: z.enum(["gasto", "ingreso"]).optional(),
+  category: z.string().optional(),
+  scope: z.enum(["finca", "modulos"]).optional(),
+  campaign: z.string().optional(),
+  batch: z.string().optional(),
+  module: z.string().optional(),
+  from: z.string().optional(), // ISO date sobre occurred_at
+  to: z.string().optional(),
+  search: z.string().optional(),
+  includeVoided: z.boolean().optional().default(true)
+});
+type FinanceFilters = z.infer<typeof financeFilters>;
+
+// WHERE componible: cada condición es un fragmento parametrizado (nunca concatena strings de usuario)
+function financeWhere(f: FinanceFilters, opts: { excludeAttribution?: boolean } = {}) {
+  const conds: ReturnType<typeof sql>[] = [];
+  if (f.tenant) conds.push(sql`m.tenant = ${f.tenant}`);
+  if (f.kind) conds.push(sql`m.kind = ${f.kind}`);
+  if (f.category) conds.push(sql`m.category = ${f.category}`);
+  if (f.scope) conds.push(sql`m.scope = ${f.scope}`);
+  if (!opts.excludeAttribution) {
+    if (f.module) conds.push(sql`m.attribution @> ${JSON.stringify([{ module: f.module }])}::jsonb`);
+    // Sentinelas de grupo: sin_lote = imputación sin batch; sin_campana = batch sin campaña o sin batch
+    if (f.batch === "sin_lote") {
+      conds.push(sql`NOT EXISTS (SELECT 1 FROM jsonb_array_elements(m.attribution) e WHERE e->>'batch' IS NOT NULL)`);
+    } else if (f.batch) {
+      conds.push(sql`m.attribution @> ${JSON.stringify([{ batch: f.batch }])}::jsonb`);
+    }
+    if (f.campaign === "sin_campana") {
+      conds.push(sql`NOT EXISTS (SELECT 1 FROM jsonb_array_elements(m.attribution) e JOIN lotes l ON l.code = e->>'batch' WHERE l.campaign IS NOT NULL)`);
+    } else if (f.campaign) {
+      conds.push(sql`EXISTS (SELECT 1 FROM jsonb_array_elements(m.attribution) e JOIN lotes l ON l.code = e->>'batch' WHERE l.campaign = ${f.campaign})`);
+    }
+  }
+  if (f.from) conds.push(sql`COALESCE(m.occurred_at, m.ts) >= ${f.from}::timestamptz`);
+  if (f.to) conds.push(sql`COALESCE(m.occurred_at, m.ts) <= (${f.to}::date + 1)::timestamptz`);
+  if (f.search && f.search.trim()) {
+    const q = `%${f.search.trim()}%`;
+    conds.push(sql`(m.op_number ILIKE ${q} OR m.note ILIKE ${q} OR m.external_ref ILIKE ${q} OR m.created_by ILIKE ${q} OR m.supplier ILIKE ${q})`);
+  }
+  if (!f.includeVoided) conds.push(sql`m.voided_by IS NULL AND m.anula_a IS NULL`);
+  return conds.length ? sql`WHERE ${sql.join(conds, sql` AND `)}` : sql``;
+}
+
+// CSV escape: comillas duplicadas; números como texto plano
+function csvCell(v: unknown): string {
+  const s = v == null ? "" : String(v);
+  return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
 
 // Contexto inyectable para tests
 export type TrpcContext = {
@@ -579,95 +633,312 @@ export const appRouter = t.router({
 
   // ── FINANZAS: resumen del mes desde movements (SUM en SQL) ──
   finance: t.router({
-    monthSummary: t.procedure
-      .input(z.object({ tenant: z.string().optional(), month: z.string().optional() }).optional())
+    // Movimientos con filtros + búsqueda + paginación server-side (ADR-0027 addendum)
+    movements: t.procedure
+      .input(financeFilters.extend({
+        page: z.number().int().min(1).optional().default(1),
+        pageSize: z.number().int().min(5).max(100).optional().default(25),
+        sortBy: z.enum(["occurred_at", "amount", "op_number", "category"]).optional(),
+        sortDir: z.enum(["asc", "desc"]).optional()
+      }).optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant;
-        // month = YYYY-MM, default mes actual UTC
-        const month = input?.month ?? new Date().toISOString().slice(0, 7);
+        const f = input ?? { includeVoided: true, page: 1, pageSize: 25 };
+        const page = f.page ?? 1;
+        const pageSize = f.pageSize ?? 25;
+        const where = financeWhere(f);
+        // Sort por columna (whitelist estricta — nunca interpolar input crudo)
+        const dir = f.sortDir === "asc" ? sql`ASC` : sql`DESC`;
+        const orderBy =
+          f.sortBy === "amount" ? sql`ORDER BY m.amount ${dir}, m.ts DESC`
+          : f.sortBy === "op_number" ? sql`ORDER BY m.op_number ${dir}, m.ts DESC`
+          : f.sortBy === "category" ? sql`ORDER BY m.category ${dir}, m.ts DESC`
+          : sql`ORDER BY COALESCE(m.occurred_at, m.ts) ${dir}, m.ts ${dir}`;
         try {
-          // Sin tenant → una fila por finca (modo "Todas", ADR-0023). Nunca se suman monedas distintas.
+          const countRes = await rawDb(ctx.db).execute(sql`SELECT count(*)::int AS total FROM movements m ${where}`);
+          const total = (countRes.rows[0] as { total: number } | undefined)?.total ?? 0;
           const res = await rawDb(ctx.db).execute(
-            sql`SELECT m.tenant, t.currency,
-                  COALESCE(SUM(CASE WHEN m.kind = 'ingreso' THEN m.amount ELSE 0 END), 0) as ingresos,
-                  COALESCE(SUM(CASE WHEN m.kind = 'gasto' THEN m.amount ELSE 0 END), 0) as gastos,
-                  COUNT(*)::int as count
+            sql`SELECT m.id, m.tenant, m.ts, m.occurred_at, m.kind, m.amount, m.currency, m.category,
+                       m.scope, m.note, m.attribution, m.op_number, m.external_ref, m.supplier, m.channel,
+                       m.source, m.created_by, m.voided_by, m.anula_a, m.replaces,
+                       (SELECT count(*)::int FROM movement_evidence e WHERE e.movement_id = m.id) AS evidence_count
                 FROM movements m
-                LEFT JOIN tenants t ON t.id = m.tenant
-                WHERE (${tenant ?? null}::text IS NULL OR m.tenant = ${tenant ?? null})
-                  AND to_char(m.ts, 'YYYY-MM') = ${month}
-                  AND m.voided_by IS NULL AND m.anula_a IS NULL
-                GROUP BY m.tenant, t.currency ORDER BY m.tenant`
+                ${where} ${orderBy} LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`
           );
-          const byTenant = (res.rows as Array<{ tenant: string; currency: string | null; ingresos: string; gastos: string; count: number }>).map((row) => {
-            const ingresos = Number(row.ingresos);
-            const gastos = Number(row.gastos);
-            return { tenant: row.tenant, currency: row.currency ?? "PEN", ingresos, gastos, balance: ingresos - gastos, count: row.count };
-          });
-          // Compat: con tenant seleccionado devuelve también el agregado plano
-          const mine = tenant ? byTenant.find((r) => r.tenant === tenant) : undefined;
           return {
-            month,
-            ingresos: mine?.ingresos ?? 0,
-            gastos: mine?.gastos ?? 0,
-            balance: mine?.balance ?? 0,
-            count: mine?.count ?? 0,
-            empty: tenant ? (mine?.count ?? 0) === 0 : byTenant.length === 0,
-            byTenant
+            rows: res.rows as Array<Record<string, unknown>>,
+            total,
+            page,
+            pageSize,
+            pageCount: Math.max(1, Math.ceil(total / pageSize))
           };
         } catch {
-          return { month, ingresos: 0, gastos: 0, balance: 0, count: 0, empty: true, byTenant: [] };
+          return { rows: [], total: 0, page, pageSize, pageCount: 1 };
         }
       }),
 
-    // Movimientos recientes (historia inmutable: incluye anulados, se muestran como tales)
-    recentMovements: t.procedure
-      .input(z.object({ tenant: z.string().optional(), limit: z.number().min(1).max(100).default(30) }).optional())
+    // Opciones para la cascada campaña → lote → módulo (datos chicos, se cachean 30s en cliente)
+    filterOptions: t.procedure
+      .input(z.object({ tenant: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
         const tenant = input?.tenant;
-        const limit = input?.limit ?? 30;
         try {
-          const res = await rawDb(ctx.db).execute(
-            sql`SELECT id, tenant, ts, kind, amount, currency, category, note, attribution,
-                       voided_by, anula_a, source, created_by
-                FROM movements
+          const lotesRes = await rawDb(ctx.db).execute(
+            sql`SELECT code, crop, campaign, modules, state, yield_kg FROM lotes
                 WHERE (${tenant ?? null}::text IS NULL OR tenant = ${tenant ?? null})
-                ORDER BY ts DESC LIMIT ${limit}`
+                ORDER BY code DESC`
           );
-          return res.rows as Array<{
-            id: string; tenant: string; ts: string; kind: string; amount: string; currency: string;
-            category: string; note: string | null; attribution: unknown;
-            voided_by: string | null; anula_a: string | null;
-            source: string | null; created_by: string | null;
-          }>;
+          const lotes = lotesRes.rows as Array<{ code: string; crop: string; campaign: string | null; modules: unknown; state: string; yield_kg: string | null }>;
+          const campaigns = [...new Set(lotes.map((l) => l.campaign).filter((c): c is string => !!c))].sort();
+          return { campaigns, lotes: lotes.map((l) => ({ code: l.code, crop: l.crop, campaign: l.campaign, modules: (l.modules as string[]) ?? [], state: l.state, yield_kg: l.yield_kg ? Number(l.yield_kg) : null })) };
+        } catch {
+          return { campaigns: [], lotes: [] };
+        }
+      }),
+
+    // KPIs reactivos a filtros + overhead de finca declarado (nunca prorrateado — opción A)
+    filteredSummary: t.procedure
+      .input(financeFilters.optional())
+      .query(async ({ ctx, input }) => {
+        const f = input ?? { includeVoided: true };
+        const where = financeWhere(f);
+        // Overhead: gastos generales de finca del rango, SIN filtros de imputación (se declaran aparte)
+        const overheadWhere = financeWhere({ ...f, scope: "finca", kind: "gasto", module: undefined, batch: undefined, campaign: undefined });
+        const attributionFiltered = !!(f.module || f.batch || f.campaign);
+        try {
+          const res = await rawDb(ctx.db).execute(
+            sql`SELECT m.kind, m.currency, COALESCE(SUM(m.amount), 0) AS total, COUNT(*)::int AS n
+                FROM movements m ${where} AND m.voided_by IS NULL AND m.anula_a IS NULL
+                GROUP BY m.kind, m.currency`
+          );
+          let ingresos = 0, gastos = 0, count = 0;
+          let currency = "PEN";
+          for (const r of res.rows as Array<{ kind: string; currency: string; total: string; n: number }>) {
+            currency = r.currency;
+            count += Number(r.n);
+            if (r.kind === "ingreso") ingresos += Number(r.total);
+            else gastos += Number(r.total);
+          }
+          // Modo "Todas": una fila por finca (ADR-0023, jamás suma multi-moneda)
+          let byTenant: Array<{ tenant: string; currency: string; ingresos: number; gastos: number; balance: number; count: number }> = [];
+          if (!f.tenant) {
+            const bt = await rawDb(ctx.db).execute(
+              sql`SELECT m.tenant, t.currency,
+                         COALESCE(SUM(CASE WHEN m.kind='ingreso' THEN m.amount ELSE 0 END), 0) AS ingresos,
+                         COALESCE(SUM(CASE WHEN m.kind='gasto' THEN m.amount ELSE 0 END), 0) AS gastos,
+                         COUNT(*)::int AS n
+                  FROM movements m LEFT JOIN tenants t ON t.id = m.tenant
+                  ${where} AND m.voided_by IS NULL AND m.anula_a IS NULL
+                  GROUP BY m.tenant, t.currency ORDER BY m.tenant`
+            );
+            byTenant = (bt.rows as Array<{ tenant: string; currency: string | null; ingresos: string; gastos: string; n: number }>).map((r) => ({
+              tenant: r.tenant, currency: r.currency ?? "PEN",
+              ingresos: Number(r.ingresos), gastos: Number(r.gastos),
+              balance: Number(r.ingresos) - Number(r.gastos), count: Number(r.n)
+            }));
+          }
+          let overhead: number | null = null;
+          if (attributionFiltered) {
+            const oh = await rawDb(ctx.db).execute(
+              sql`SELECT COALESCE(SUM(m.amount), 0) AS total FROM movements m ${overheadWhere} AND m.voided_by IS NULL AND m.anula_a IS NULL`
+            );
+            overhead = Number((oh.rows[0] as { total: string } | undefined)?.total ?? 0);
+          }
+          // Costo-por-kg cuando el filtro es un lote concreto con rendimiento declarado (null honesto)
+          let yield_kg: number | null = null;
+          let costo_por_kg: number | null = null;
+          if (f.batch) {
+            const lr = await rawDb(ctx.db).execute(sql`SELECT yield_kg FROM lotes WHERE code = ${f.batch}`);
+            yield_kg = (lr.rows[0] as { yield_kg: string | null } | undefined)?.yield_kg != null ? Number((lr.rows[0] as { yield_kg: string }).yield_kg) : null;
+            if (yield_kg && yield_kg > 0) costo_por_kg = Math.round((gastos / yield_kg) * 10000) / 10000;
+          }
+          return { ingresos, gastos, balance: ingresos - gastos, count, currency, overhead, yield_kg, costo_por_kg, byTenant };
+        } catch {
+          return { ingresos: 0, gastos: 0, balance: 0, count: 0, currency: "PEN", overhead: null, yield_kg: null, costo_por_kg: null, byTenant: [] };
+        }
+      }),
+
+    // Totales agrupados (lote/campaña/categoría) bajo los mismos filtros — para la vista agrupada
+    groupedTotals: t.procedure
+      .input(financeFilters.extend({ groupBy: z.enum(["batch", "campaign", "category"]) }).optional())
+      .query(async ({ ctx, input }) => {
+        const f = input ?? { includeVoided: true, groupBy: "batch" as const };
+        const groupBy = f.groupBy ?? "batch";
+        const where = financeWhere(f);
+        const groupExpr =
+          groupBy === "category" ? sql`m.category`
+          : groupBy === "campaign" ? sql`COALESCE((SELECT l.campaign FROM lotes l WHERE l.code = elem->>'batch'), 'sin_campana')`
+          : sql`COALESCE(elem->>'batch', 'sin_lote')`;
+        const tryGrouped = groupBy !== "category";
+        try {
+          if (!tryGrouped) {
+            const res = await rawDb(ctx.db).execute(
+              sql`SELECT m.category AS grp, m.currency,
+                         COALESCE(SUM(CASE WHEN m.kind='gasto' THEN m.amount ELSE 0 END), 0) AS gasto,
+                         COALESCE(SUM(CASE WHEN m.kind='ingreso' THEN m.amount ELSE 0 END), 0) AS ingreso,
+                         COUNT(*)::int AS n
+                  FROM movements m ${where} AND m.voided_by IS NULL AND m.anula_a IS NULL
+                  GROUP BY m.category, m.currency ORDER BY gasto DESC`
+            );
+            return (res.rows as Array<Record<string, unknown>>).map((r) => ({
+              group: String(r.grp), currency: String(r.currency ?? "PEN"),
+              gasto: Number(r.gasto), ingreso: Number(r.ingreso), neto: Math.round((Number(r.ingreso) - Number(r.gasto)) * 100) / 100, count: Number(r.n)
+            }));
+          }
+          const res = await rawDb(ctx.db).execute(
+            sql`SELECT ${groupExpr} AS grp, m.currency,
+                       COALESCE(SUM(CASE WHEN m.kind='gasto' THEN COALESCE((elem->>'amount')::numeric, m.amount) ELSE 0 END), 0) AS gasto,
+                       COALESCE(SUM(CASE WHEN m.kind='ingreso' THEN COALESCE((elem->>'amount')::numeric, m.amount) ELSE 0 END), 0) AS ingreso,
+                       COUNT(DISTINCT m.id)::int AS n
+                FROM movements m
+                LEFT JOIN LATERAL jsonb_array_elements(m.attribution) elem ON true
+                ${where} AND m.voided_by IS NULL AND m.anula_a IS NULL
+                GROUP BY grp, m.currency ORDER BY gasto DESC`
+          );
+          return (res.rows as Array<Record<string, unknown>>).map((r) => ({
+            group: String(r.grp), currency: String(r.currency ?? "PEN"),
+            gasto: Number(r.gasto), ingreso: Number(r.ingreso), neto: Math.round((Number(r.ingreso) - Number(r.gasto)) * 100) / 100, count: Number(r.n)
+          }));
         } catch {
           return [];
         }
       }),
 
-    // Gasto por categoría del mes (SUM en SQL — ADR-0011: cero aritmética en render)
-    byCategory: t.procedure
-      .input(z.object({ tenant: z.string().optional(), month: z.string().optional() }).optional())
+    // Export CSV respeta los filtros activos (para el contador). Cap 5000 filas.
+    exportCsv: t.procedure
+      .input(financeFilters.optional())
       .query(async ({ ctx, input }) => {
-        const tenant = input?.tenant;
-        const month = input?.month ?? new Date().toISOString().slice(0, 7);
-        try {
-          const res = await rawDb(ctx.db).execute(
-            sql`SELECT m.tenant, m.category, t.currency, COALESCE(SUM(m.amount), 0) AS total
-                FROM movements m
-                LEFT JOIN tenants t ON t.id = m.tenant
-                WHERE (${tenant ?? null}::text IS NULL OR m.tenant = ${tenant ?? null})
-                  AND m.kind = 'gasto'
-                  AND to_char(m.ts, 'YYYY-MM') = ${month}
-                  AND m.voided_by IS NULL AND m.anula_a IS NULL
-                GROUP BY m.tenant, m.category, t.currency ORDER BY m.tenant, total DESC`
-          );
-          return (res.rows as Array<{ tenant: string; category: string; currency: string | null; total: string }>)
-            .map((r) => ({ tenant: r.tenant, category: r.category, currency: r.currency ?? "PEN", total: Number(r.total) }));
-        } catch {
-          return [];
+        const f = input ?? { includeVoided: true };
+        const where = financeWhere(f);
+        const res = await rawDb(ctx.db).execute(
+          sql`SELECT m.op_number, COALESCE(m.occurred_at, m.ts) AS fecha, m.kind, m.amount, m.currency,
+                     m.category, m.scope, m.attribution, m.supplier, m.external_ref, m.note, m.channel, m.created_by,
+                     CASE WHEN m.voided_by IS NOT NULL OR m.anula_a IS NOT NULL THEN 'anulado' ELSE 'vigente' END AS estado
+              FROM movements m ${where}
+              ORDER BY COALESCE(m.occurred_at, m.ts) DESC LIMIT 5000`
+        );
+        const header = ["operacion", "fecha", "tipo", "monto", "moneda", "categoria", "alcance", "modulos", "lotes", "proveedor", "ref_externa", "nota", "canal", "registrado_por", "estado"];
+        const lines = [header.join(";")];
+        for (const r of res.rows as Array<Record<string, unknown>>) {
+          const attr = Array.isArray(r.attribution) ? (r.attribution as Array<{ module?: string; batch?: string }>) : [];
+          lines.push([
+            csvCell(r.op_number), csvCell(r.fecha ? new Date(r.fecha as string).toISOString().slice(0, 10) : ""),
+            csvCell(r.kind), csvCell(r.amount), csvCell(r.currency), csvCell(r.category), csvCell(r.scope),
+            csvCell(attr.map((a) => a.module).filter(Boolean).join("|")),
+            csvCell([...new Set(attr.map((a) => a.batch).filter(Boolean))].join("|")),
+            csvCell(r.supplier), csvCell(r.external_ref), csvCell(r.note), csvCell(r.channel), csvCell(r.created_by), csvCell(r.estado)
+          ].join(";"));
         }
-      })
+        return { csv: lines.join("\n"), count: lines.length - 1 };
+      }),
+
+    // Adjuntar evidencia a un movimiento existente (post-hoc)
+    attachEvidence: t.procedure
+      .input(z.object({ movement: z.string().min(1), evidence_id: z.string().min(1), tenant: z.string().min(1) }))
+      .mutation(async ({ input }) => {
+        const res = await attachEvidence(input);
+        if (res.status !== "attached") {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: String(res.text ?? "no adjuntado") });
+        }
+        return res;
+      }),
+
+    // Detalle de un movimiento: metadata completa + evidencias + cadena de corrección
+    movementDetail: t.procedure
+      .input(z.object({ id: z.string().min(1) }))
+      .query(async ({ ctx, input }) => {
+        const db = rawDb(ctx.db);
+        try {
+          const res = await db.execute(
+            sql`SELECT m.*, (SELECT m2.op_number FROM movements m2 WHERE m2.id = m.replaces) AS replaces_op,
+                       (SELECT m2.op_number FROM movements m2 WHERE m2.id = m.voided_by) AS voided_by_op,
+                       (SELECT m2.op_number FROM movements m2 WHERE m2.id = m.anula_a) AS anula_a_op
+                FROM movements m WHERE m.id = ${input.id}`
+          );
+          const movement = (res.rows[0] as Record<string, unknown> | undefined) ?? null;
+          if (!movement) return null;
+          // Cadena: quién reemplazó a este (si fue editado) y quién lo anuló
+          const chainRes = await db.execute(
+            sql`SELECT id, op_number, kind, amount, currency, note, source, created_by, occurred_at, ts, anula_a, replaces
+                FROM movements WHERE replaces = ${input.id} OR anula_a = ${input.id} ORDER BY ts`
+          );
+          const evRes = await db.execute(
+            sql`SELECT id, sha256, mime_type, size_bytes, kind, channel, uploaded_by, uploaded_at, note
+                FROM movement_evidence WHERE movement_id = ${input.id} ORDER BY uploaded_at`
+          );
+          return {
+            movement,
+            chain: chainRes.rows as Array<Record<string, unknown>>,
+            evidence: evRes.rows as Array<{
+              id: string; sha256: string; mime_type: string; size_bytes: number;
+              kind: string; channel: string | null; uploaded_by: string;
+              uploaded_at: string; note: string | null;
+            }>
+          };
+        } catch {
+          return null;
+        }
+      }),
+
+    // — Escrituras: SIEMPRE vía services/finance (un dueño, ADR-0027 §8) —
+    register: t.procedure
+      .input(z.object({
+        tenant: z.string().min(1),
+        kind: z.enum(["gasto", "ingreso"]),
+        amount: z.number().positive(),
+        currency: z.string().optional(),
+        category: z.string().min(1),
+        scope: z.enum(["finca", "modulos"]),
+        attribution: z.array(z.object({ module: z.string().min(1), amount: z.number().positive() })).optional(),
+        note: z.string().optional(),
+        occurred_at: z.string().optional(),
+        external_ref: z.string().optional(),
+        supplier: z.string().optional(),
+        evidence_ids: z.array(z.string()).optional(),
+        force: z.boolean().optional()
+      }))
+      .mutation(async ({ input }) => {
+        const res = await registerMovement(input);
+        if (res.status === "possible_duplicate") return res; // la UI confirma y reenvía con force
+        if (res.status !== "registered") {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: String(res.text ?? "registro rechazado") });
+        }
+        return res;
+      }),
+
+    void: t.procedure
+      .input(z.object({ id: z.string().min(1), tenant: z.string().min(1), reason: z.string().min(1) }))
+      .mutation(async ({ input }) => {
+        const res = await voidMovement(input);
+        if (res.status !== "voided") {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: String(res.text ?? "anulación rechazada") });
+        }
+        return res;
+      }),
+
+    edit: t.procedure
+      .input(z.object({
+        id: z.string().min(1),
+        reason: z.string().min(1),
+        tenant: z.string().min(1),
+        kind: z.enum(["gasto", "ingreso"]),
+        amount: z.number().positive(),
+        currency: z.string().optional(),
+        category: z.string().min(1),
+        scope: z.enum(["finca", "modulos"]),
+        attribution: z.array(z.object({ module: z.string().min(1), amount: z.number().positive() })).optional(),
+        note: z.string().optional(),
+        occurred_at: z.string().optional(),
+        external_ref: z.string().optional(),
+        supplier: z.string().optional(),
+        evidence_ids: z.array(z.string()).optional()
+      }))
+      .mutation(async ({ input }) => {
+        const res = await editMovement(input);
+        if (res.status !== "edited") {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: String(res.text ?? "edición rechazada") });
+        }
+        return res;
+      }),
   }),
 
   // ── PENDIENTES: alertas recientes + aprobaciones y órdenes (Fase 3) ──
@@ -835,6 +1106,7 @@ export const appRouter = t.router({
       .input(z.object({
         id: z.string().uuid(),
         reason: z.enum(["cosecha", "venta", "perdida", "otro"]),
+        yield_kg: z.number().min(0).optional(),
         note: z.string().optional()
       }))
       .mutation(async ({ input }) => closeBatch(input)),

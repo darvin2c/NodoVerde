@@ -6,6 +6,8 @@ import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Button } from "@/components/ui/button.tsx";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty.tsx";
+import { ShieldCheck } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table.tsx";
@@ -86,9 +88,15 @@ export function AlertasPage() {
           {isLoading ? (
             <div className="p-6 space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10" />)}</div>
           ) : !alerts || alerts.length === 0 ? (
-            <p className="p-6 text-sm text-muted-foreground">
-              {tab === "open" ? "Sin alertas abiertas — el sistema está sano." : "Sin alertas registradas."}
-            </p>
+            <Empty className="border-0 py-10">
+              <EmptyHeader>
+                <EmptyMedia variant="icon"><ShieldCheck /></EmptyMedia>
+                <EmptyTitle>{tab === "open" ? "Sin alertas abiertas" : "Sin alertas registradas"}</EmptyTitle>
+                <EmptyDescription>
+                  {tab === "open" ? "El sistema está sano — los umbrales de Grafana y el watchdog no reportan nada." : "El historial de alertas está vacío."}
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : (
             <Table>
               <TableHeader>

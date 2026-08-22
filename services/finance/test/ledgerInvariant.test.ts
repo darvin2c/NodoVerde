@@ -79,7 +79,9 @@ describe("ledgerInvariant — SQL de violaciones", () => {
     expect(LEDGER_VIOLATION_SQL).toMatch(/attribution IS NULL/);
     expect(LEDGER_VIOLATION_SQL).toMatch(/jsonb_typeof\(attribution\)/);
     expect(LEDGER_VIOLATION_SQL).toMatch(/jsonb_array_elements/);
-    expect(LEDGER_VIOLATION_SQL).toMatch(/0\.001/);
+    expect(LEDGER_VIOLATION_SQL).toMatch(/0\.005/);
+    expect(LEDGER_VIOLATION_SQL).toMatch(/scope = 'finca'/);
+    expect(LEDGER_VIOLATION_SQL).toMatch(/scope = 'modulos'/);
     expect(LEDGER_VIOLATION_SQL).toMatch(/btrim\(category\)/);
     expect(LEDGER_VIOLATION_SQL).toMatch(/btrim\(currency\)/);
     expect(LEDGER_VIOLATION_SQL).toMatch(/ABS/);

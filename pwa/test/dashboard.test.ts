@@ -49,28 +49,35 @@ describe("alerts.list — centro de alertas", () => {
   });
 });
 
-describe("finance.recentMovements y byCategory", () => {
-  it("recentMovements devuelve filas con estado de anulación", async () => {
-    const caller = callerWith(mockDb([
-      { id: "1", ts: "2026-08-19T00:00:00Z", kind: "gasto", amount: "150.00", currency: "PEN",
-        category: "nutrientes", note: "compra A/B", attribution: [], voided_by: null, anula_a: null, source: "chat", created_by: "humano" },
-      { id: "2", ts: "2026-08-18T00:00:00Z", kind: "gasto", amount: "90.00", currency: "PEN",
-        category: "agua", note: "error de captura", attribution: [], voided_by: "3", anula_a: null, source: "chat", created_by: "humano" }
-    ]));
-    const rows = await caller.finance.recentMovements({ tenant: "demo", limit: 30 });
-    expect(rows).toHaveLength(2);
-    expect(rows[1].voided_by).toBe("3");
+describe("finance.movements y groupedTotals", () => {
+  it("movements devuelve página con total y filas (count + rows en dos queries)", async () => {
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: 2 }] })
+        .mockResolvedValueOnce({ rows: [
+          { id: "1", ts: "2026-08-19T00:00:00Z", kind: "gasto", amount: "150.00", currency: "PEN",
+            category: "nutrientes", note: "compra A/B", attribution: [], voided_by: null, anula_a: null, source: "chat", created_by: "humano" },
+          { id: "2", ts: "2026-08-18T00:00:00Z", kind: "gasto", amount: "90.00", currency: "PEN",
+            category: "agua", note: "error de captura", attribution: [], voided_by: "3", anula_a: null, source: "chat", created_by: "humano" }
+        ] })
+    } as unknown as never;
+    const caller = callerWith(db);
+    const res = await caller.finance.movements({ tenant: "demo", page: 1, pageSize: 25 });
+    expect(res.total).toBe(2);
+    expect(res.rows).toHaveLength(2);
+    expect(res.pageCount).toBe(1);
+    expect((res.rows[1] as { voided_by: string }).voided_by).toBe("3");
   });
 
-  it("byCategory devuelve totales numéricos por categoría y finca (ADR-0023)", async () => {
+  it("groupedTotals por categoría devuelve totales numéricos (ADR-0023)", async () => {
     const caller = callerWith(mockDb([
-      { tenant: "demo", category: "nutrientes", currency: "PEN", total: "230.50" },
-      { tenant: "demo", category: "software", currency: "PEN", total: "41.20" }
+      { grp: "nutrientes", currency: "PEN", gasto: "230.50", ingreso: "0", n: 4 },
+      { grp: "software", currency: "PEN", gasto: "41.20", ingreso: "10", n: 2 }
     ]));
-    const rows = await caller.finance.byCategory({ tenant: "demo" });
+    const rows = await caller.finance.groupedTotals({ tenant: "demo", groupBy: "category" });
     expect(rows).toEqual([
-      { tenant: "demo", category: "nutrientes", currency: "PEN", total: 230.5 },
-      { tenant: "demo", category: "software", currency: "PEN", total: 41.2 }
+      { group: "nutrientes", currency: "PEN", gasto: 230.5, ingreso: 0, neto: -230.5, count: 4 },
+      { group: "software", currency: "PEN", gasto: 41.2, ingreso: 10, neto: -31.2, count: 2 }
     ]);
   });
 });

@@ -57,6 +57,10 @@ export default defineConfig({
       "/trpc": {
         target: `http://localhost:${process.env.PWA_SERVER_PORT || 7780}`,
         changeOrigin: true
+      },
+      "/api": {
+        target: `http://localhost:${process.env.PWA_SERVER_PORT || 7780}`,
+        changeOrigin: true
       }
     }
   }

@@ -122,21 +122,30 @@ SELECT create_hypertable('alerts', 'time', chunk_time_interval => INTERVAL '7 da
 CREATE INDEX IF NOT EXISTS idx_alerts_lookup ON alerts (tenant, module, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity, time DESC);
 
--- Movements (ADR-0011 — append-only ledger; Fase 2: imputación + inmutabilidad + dedup)
+-- Movements (ADR-0011 + ADR-0027 — append-only ledger: imputación en montos,
+-- dos niveles finca/módulos con lote derivado, traza de procedencia, dedup)
 CREATE TABLE IF NOT EXISTS movements (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant TEXT NOT NULL,
-  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),     -- cuándo se grabó
   kind TEXT NOT NULL CONSTRAINT movements_kind_check CHECK (kind IN ('gasto','ingreso')),
   amount NUMERIC NOT NULL,
   currency TEXT NOT NULL DEFAULT 'PEN',
   category TEXT NOT NULL CONSTRAINT movements_category_check CHECK (category IN ('nutrientes','energia','agua','plantulas','mano_obra','empaque','transporte','venta_cosecha','software','otro')),
-  attribution JSONB,
-  evidence_url TEXT,
+  scope TEXT NOT NULL DEFAULT 'modulos' CONSTRAINT movements_scope_check CHECK (scope IN ('finca','modulos')),
+  attribution JSONB,                        -- scope=modulos: [{module, amount, batch?}] suma = amount; scope=finca: NULL
+  evidence_url TEXT,                        -- DEPRECADO (ADR-0027): evidencia vive en movement_evidence
   voided_by UUID REFERENCES movements(id),
   anula_a UUID REFERENCES movements(id),
+  replaces UUID REFERENCES movements(id),   -- edición = anular + recrear (ADR-0027)
   source_event TEXT,
   source TEXT,
+  channel TEXT CONSTRAINT movements_channel_check CHECK (channel IS NULL OR channel IN ('telegram','whatsapp','webchat','pwa','auto')),
+  raw_payload TEXT,                         -- mensaje original verbatim (traza de procedencia)
+  occurred_at TIMESTAMPTZ,                  -- fecha económica declarada (≠ ts de registro)
+  external_ref TEXT,                        -- nro. de operación externo (Yape/Plin/banco) — dedup fuerte
+  supplier TEXT,                            -- a quién se le compró/pagó (opcional)
+  op_number TEXT,                           -- MOV-NNNN correlativo humano por tenant
   created_by TEXT,
   note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -144,6 +153,38 @@ CREATE TABLE IF NOT EXISTS movements (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_movements_source_event_unique
   ON movements (tenant, source_event) WHERE source_event IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_movements_op_number_unique
+  ON movements (tenant, op_number) WHERE op_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_movements_external_ref
+  ON movements (tenant, external_ref) WHERE external_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_movements_occurred_at ON movements (occurred_at);
+
+-- Contador de op_number por tenant (MOV-NNNN, atómico)
+CREATE TABLE IF NOT EXISTS tenant_counters (
+  tenant TEXT PRIMARY KEY,
+  op_seq INTEGER NOT NULL DEFAULT 0
+);
+
+-- movement_evidence (ADR-0027): soporte probatorio multi-archivo en MinIO —
+-- cualquier mime (imagen/audio/PDF/video). Bytes en MinIO, aquí solo metadata.
+CREATE TABLE IF NOT EXISTS movement_evidence (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  movement_id UUID REFERENCES movements(id),  -- NULL = subida pendiente de adjuntar
+  tenant TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+  kind TEXT NOT NULL DEFAULT 'otro'
+    CONSTRAINT movement_evidence_kind_check
+    CHECK (kind IN ('recibo','captura_pago','factura','audio','foto_producto','otro')),
+  channel TEXT,
+  uploaded_by TEXT NOT NULL,
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_movement_evidence_movement ON movement_evidence (movement_id);
+CREATE INDEX IF NOT EXISTS idx_movement_evidence_sha ON movement_evidence (tenant, sha256);
 
 -- supply_costs (ADR-0011 — costo unitario por insumo para valorización de dosis)
 CREATE TABLE IF NOT EXISTS supply_costs (
@@ -161,27 +202,33 @@ INSERT INTO supply_costs (supply, unit, cost_per_unit, currency) VALUES
 ON CONFLICT (supply) DO NOTHING;
 -- Precios placeholder: el agricultor los actualiza vía set_supply_cost (terra-finance).
 
--- ── trigger: validación de imputación (ADR-0011) ───────────────────────────
+-- ── trigger: validación de imputación (ADR-0011 + ADR-0027) ────────────────
 CREATE OR REPLACE FUNCTION validate_movement_attribution() RETURNS trigger AS $$
 DECLARE
   _elem JSONB;
-  _pct NUMERIC;
+  _amt NUMERIC;
   _sum NUMERIC := 0;
   _mod TEXT;
   _cnt INT;
 BEGIN
-  IF NEW.category IS NULL THEN
+  IF NEW.category IS NULL OR btrim(NEW.category) = '' THEN
     RAISE EXCEPTION 'categoría obligatoria: todo movimiento debe tener categoría';
   END IF;
-  IF NEW.attribution IS NULL THEN
-    RAISE EXCEPTION 'atribución obligatoria: debe ser un array no vacío de {module, pct}';
+  IF NEW.scope = 'finca' THEN
+    IF NEW.attribution IS NOT NULL
+       AND NOT (jsonb_typeof(NEW.attribution) = 'array' AND jsonb_array_length(NEW.attribution) = 0) THEN
+      RAISE EXCEPTION 'scope finca: attribution debe ser NULL (gasto general de finca, sin módulos)';
+    END IF;
+    NEW.attribution := NULL;
+    RETURN NEW;
   END IF;
-  IF jsonb_typeof(NEW.attribution) <> 'array' THEN
-    RAISE EXCEPTION 'atribución inválida: debe ser un array JSONB no vacío de {module, pct}';
+  -- scope modulos: array no vacío de {module, amount, batch?}; suma de montos = total
+  IF NEW.attribution IS NULL OR jsonb_typeof(NEW.attribution) <> 'array' THEN
+    RAISE EXCEPTION 'atribución obligatoria: array no vacío de {module, amount, batch?}';
   END IF;
   _cnt := jsonb_array_length(NEW.attribution);
   IF _cnt IS NULL OR _cnt = 0 THEN
-    RAISE EXCEPTION 'atribución inválida: array vacío, debe tener al menos un elemento {module, pct}';
+    RAISE EXCEPTION 'atribución inválida: array vacío, al menos un elemento {module, amount}';
   END IF;
   FOR _elem IN SELECT * FROM jsonb_array_elements(NEW.attribution)
   LOOP
@@ -193,17 +240,18 @@ BEGIN
       RAISE EXCEPTION 'atribución inválida: módulo "%" no existe para tenant "%"', _mod, NEW.tenant;
     END IF;
     BEGIN
-      _pct := (_elem ->> 'pct')::NUMERIC;
+      _amt := (_elem ->> 'amount')::NUMERIC;
     EXCEPTION WHEN others THEN
-      RAISE EXCEPTION 'atribución inválida: pct debe ser número > 0 (módulo %)', _mod;
+      RAISE EXCEPTION 'atribución inválida: amount debe ser número > 0 (módulo %)', _mod;
     END;
-    IF _pct IS NULL OR _pct <= 0 THEN
-      RAISE EXCEPTION 'atribución inválida: pct debe ser > 0 (módulo %)', _mod;
+    IF _amt IS NULL OR _amt <= 0 THEN
+      RAISE EXCEPTION 'atribución inválida: amount debe ser > 0 (módulo %)', _mod;
     END IF;
-    _sum := _sum + _pct;
+    _sum := _sum + _amt;
   END LOOP;
-  IF abs(_sum - 100) > 0.001 THEN
-    RAISE EXCEPTION 'atribución inválida: la suma de pct debe ser 100 (actual %)', _sum;
+  -- abs(): los espejos de anulación llevan amount negativo con attribution positivo
+  IF abs(_sum - abs(NEW.amount)) > 0.005 THEN
+    RAISE EXCEPTION 'atribución inválida: la suma de montos (%) debe igualar el total (%)', _sum, NEW.amount;
   END IF;
   RETURN NEW;
 END;
@@ -245,6 +293,13 @@ BEGIN
      AND OLD.created_by IS NOT DISTINCT FROM NEW.created_by
      AND OLD.note IS NOT DISTINCT FROM NEW.note
      AND OLD.created_at IS NOT DISTINCT FROM NEW.created_at
+     AND OLD.scope IS NOT DISTINCT FROM NEW.scope
+     AND OLD.occurred_at IS NOT DISTINCT FROM NEW.occurred_at
+     AND OLD.channel IS NOT DISTINCT FROM NEW.channel
+     AND OLD.raw_payload IS NOT DISTINCT FROM NEW.raw_payload
+     AND OLD.external_ref IS NOT DISTINCT FROM NEW.external_ref
+     AND OLD.op_number IS NOT DISTINCT FROM NEW.op_number
+     AND OLD.replaces IS NOT DISTINCT FROM NEW.replaces
   THEN
     RETURN NEW;
   END IF;
@@ -260,6 +315,46 @@ DROP TRIGGER IF EXISTS trg_movements_immutable_update ON movements;
 CREATE TRIGGER trg_movements_immutable_update
   BEFORE UPDATE ON movements
   FOR EACH ROW EXECUTE FUNCTION enforce_movement_immutable_update();
+
+-- ── evidencia inmutable (ADR-0027): solo adjuntar (movement_id NULL → UUID) ─
+CREATE OR REPLACE FUNCTION prevent_evidence_delete() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'evidencia inmutable: no se permite borrar evidencia (la historia financiera conserva sus pruebas)';
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_evidence_no_delete ON movement_evidence;
+CREATE TRIGGER trg_evidence_no_delete
+  BEFORE DELETE ON movement_evidence
+  FOR EACH ROW EXECUTE FUNCTION prevent_evidence_delete();
+
+CREATE OR REPLACE FUNCTION enforce_evidence_immutable_update() RETURNS trigger AS $$
+BEGIN
+  IF OLD.movement_id IS NULL AND NEW.movement_id IS NOT NULL
+     AND OLD.id IS NOT DISTINCT FROM NEW.id
+     AND OLD.tenant IS NOT DISTINCT FROM NEW.tenant
+     AND OLD.object_key IS NOT DISTINCT FROM NEW.object_key
+     AND OLD.sha256 IS NOT DISTINCT FROM NEW.sha256
+     AND OLD.mime_type IS NOT DISTINCT FROM NEW.mime_type
+     AND OLD.size_bytes IS NOT DISTINCT FROM NEW.size_bytes
+     AND OLD.kind IS NOT DISTINCT FROM NEW.kind
+     AND OLD.channel IS NOT DISTINCT FROM NEW.channel
+     AND OLD.uploaded_by IS NOT DISTINCT FROM NEW.uploaded_by
+     AND OLD.uploaded_at IS NOT DISTINCT FROM NEW.uploaded_at
+     AND OLD.note IS NOT DISTINCT FROM NEW.note
+  THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'evidencia inmutable: solo se permite adjuntar (movement_id de NULL a UUID, una vez)';
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_evidence_immutable_update ON movement_evidence;
+CREATE TRIGGER trg_evidence_immutable_update
+  BEFORE UPDATE ON movement_evidence
+  FOR EACH ROW EXECUTE FUNCTION enforce_evidence_immutable_update();
 
 -- Seed: tenant demo
 INSERT INTO tenants (id, name, location_name, lat, lon, tz) VALUES
@@ -446,6 +541,7 @@ CREATE TABLE IF NOT EXISTS lotes (
   expected_end_at TIMESTAMPTZ,              -- started_at + crop_profiles.cycle_days (null si perfil sin ciclo)
   closed_at TIMESTAMPTZ,
   close_reason TEXT CHECK (close_reason IN ('cosecha','venta','perdida','otro')),
+  yield_kg NUMERIC CHECK (yield_kg IS NULL OR yield_kg >= 0),  -- kg cosechados al cierre (null = sin báscula, honesto)
   profile_hash TEXT NOT NULL,               -- sha256 del perfil al abrir (comparabilidad ADR-0012)
   memory_hash TEXT,                         -- sha256 MEMORY.md del experto al abrir (null honesto)
   memory_hash_close TEXT,                   -- idem al cerrar
