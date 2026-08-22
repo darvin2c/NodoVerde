@@ -237,11 +237,12 @@ export async function closeBatchDb(
   reason: string,
   memoryHashClose: string | null,
   note: string | null,
+  yieldKg: number | null = null,
 ): Promise<{ id: string; code: string; closed_at: Date } | null> {
   const r = await writePool.query(
-    `UPDATE lotes SET memory_hash_close = $1, closed_at = now(), close_reason = $2, state = 'closed', note = COALESCE($3, note)
+    `UPDATE lotes SET memory_hash_close = $1, closed_at = now(), close_reason = $2, state = 'closed', note = COALESCE($3, note), yield_kg = $5
      WHERE id = $4 AND state = 'open' RETURNING id, code, closed_at`,
-    [memoryHashClose, reason, note, id],
+    [memoryHashClose, reason, note, id, yieldKg],
   );
   return (r.rows[0] as unknown as { id: string; code: string; closed_at: Date }) ?? null;
 }

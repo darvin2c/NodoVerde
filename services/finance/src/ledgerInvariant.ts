@@ -1,6 +1,7 @@
-// src/ledgerInvariant.ts — chequeo periódico invariante de ledger (ADR-0021)
-// invariant_ledger: attribution NULL / suma pct ≠100 toler 0.001 / category o currency vacíos
-// sobre movimientos vigentes (voided_by IS NULL AND anula_a IS NULL), en SQL.
+// src/ledgerInvariant.ts — chequeo periódico invariante de ledger (ADR-0021/0027)
+// invariant_ledger: scope='modulos' exige attribution con suma de montos = total (±0.005);
+// scope='finca' exige attribution NULL; category y currency obligatorios.
+// Sobre movimientos vigentes (voided_by IS NULL AND anula_a IS NULL), en SQL.
 import crypto from "node:crypto";
 import mqtt from "mqtt";
 import { pool } from "./db.js";
@@ -34,12 +35,15 @@ SELECT id::text AS id, tenant
 FROM movements
 WHERE voided_by IS NULL AND anula_a IS NULL
   AND (
-    attribution IS NULL
-    OR jsonb_typeof(attribution) <> 'array'
-    OR jsonb_array_length(attribution) = 0
-    OR ABS((SELECT COALESCE(SUM((elem->>'pct')::numeric), 0) FROM jsonb_array_elements(attribution) AS elem) - 100) > 0.001
-    OR category IS NULL OR btrim(category) = ''
+    category IS NULL OR btrim(category) = ''
     OR currency IS NULL OR btrim(currency) = ''
+    OR (scope = 'finca' AND attribution IS NOT NULL)
+    OR (scope = 'modulos' AND (
+      attribution IS NULL
+      OR jsonb_typeof(attribution) <> 'array'
+      OR jsonb_array_length(attribution) = 0
+      OR ABS((SELECT COALESCE(SUM((elem->>'amount')::numeric), 0) FROM jsonb_array_elements(attribution) AS elem) - amount) > 0.005
+    ))
   )
 ORDER BY id
 `.trim();

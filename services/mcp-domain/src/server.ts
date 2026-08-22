@@ -427,10 +427,11 @@ export function createMcpServer(): McpServer {
       inputSchema: {
         id: z.string().uuid().describe("Id del lote"),
         reason: z.enum(["cosecha", "venta", "perdida", "otro"]).describe("Razón de cierre"),
+        yield_kg: z.number().min(0).optional().describe("Kg cosechados (null honesto si no hay báscula) — habilita costo-por-kg"),
         note: z.string().optional().describe("Nota opcional de cierre"),
       },
     },
-    async ({ id, reason, note }) => {
+    async ({ id, reason, yield_kg, note }) => {
       const batch = await getBatchDb(id);
       if (!batch) {
         return {
@@ -445,13 +446,13 @@ export function createMcpServer(): McpServer {
         };
       }
       const memoryHashClose = await computeMemoryHash(batch.crop);
-      const row = await closeBatchDb(id, reason, memoryHashClose, note ?? null);
+      const row = await closeBatchDb(id, reason, memoryHashClose, note ?? null, yield_kg ?? null);
       // ADR-0025: al cerrar, las mesas vuelven a estar libres (sin cultivo)
       await setModulesCropDb(batch.tenant, (batch.modules as unknown as string[]) ?? [], null);
       const text = `Lote cerrado ${row?.code ?? id} razón=${reason}`;
       return {
-        content: [{ type: "text", text: `${text}\n${summaryText({ id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose })}` }],
-        structuredContent: { id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, memory_hash_close: memoryHashClose } as unknown as Record<string, unknown>,
+        content: [{ type: "text", text: `${text}\n${summaryText({ id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, yield_kg: yield_kg ?? null, memory_hash_close: memoryHashClose })}` }],
+        structuredContent: { id, code: row?.code, closed_at: row?.closed_at, close_reason: reason, yield_kg: yield_kg ?? null, memory_hash_close: memoryHashClose } as unknown as Record<string, unknown>,
       };
     },
   );

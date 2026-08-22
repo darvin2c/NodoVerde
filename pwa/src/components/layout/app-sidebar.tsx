@@ -21,8 +21,12 @@ const NAV_OPS = [
   { to: "/produccion", label: "Producción", icon: Sprout },
   { to: "/perfiles", label: "Perfiles", icon: Leaf },
   { to: "/aprobaciones", label: "Aprobaciones", icon: CheckSquare },
-  { to: "/finanzas", label: "Finanzas", icon: Wallet },
   { to: "/camaras", label: "Cámaras", icon: Camera },
+] as const;
+
+// Finanzas es sección de primer nivel (ADR-0027): captura + ledger, no solo lectura
+const NAV_FIN = [
+  { to: "/finanzas", label: "Finanzas", icon: Wallet },
 ] as const;
 
 const NAV_SYS = [
@@ -95,6 +99,12 @@ export function AppSidebar() {
           <SidebarGroupLabel>Operación</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>{renderItems(NAV_OPS)}</SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupLabel>Finanzas</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>{renderItems(NAV_FIN)}</SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
         <SidebarGroup>

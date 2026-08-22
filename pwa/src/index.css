@@ -137,5 +137,6 @@
   }
   body {
     @apply bg-background text-foreground antialiased font-sans;
+    position: relative; /* Base UI drawer: overlay absoluto en iOS Safari */
   }
 }

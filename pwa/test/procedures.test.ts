@@ -12,48 +12,71 @@ function callerWith(db: unknown) {
   return appRouter.createCaller({ db: db as never });
 }
 
-describe("finance.monthSummary — movements vacíos", () => {
-  it("retorna empty=true y ceros cuando no hay movimientos", async () => {
-    const db = mockDb([{ tenant: "demo", currency: "PEN", ingresos: "0", gastos: "0", count: 0 }]);
+describe("finance.filteredSummary — KPIs reactivos a filtros", () => {
+  it("ceros honestos cuando no hay movimientos", async () => {
+    const db = mockDb([]);
     const caller = callerWith(db);
-    const res = await caller.finance.monthSummary({ tenant: "demo" });
-    expect(res.empty).toBe(true);
+    const res = await caller.finance.filteredSummary({ tenant: "demo" });
     expect(res.ingresos).toBe(0);
     expect(res.gastos).toBe(0);
     expect(res.balance).toBe(0);
     expect(res.count).toBe(0);
   });
 
-  it("suma correctamente ingresos y gastos (aritmética en SQL simulada)", async () => {
-    const db = mockDb([{ tenant: "demo", currency: "PEN", ingresos: "1200.50", gastos: "840.00", count: 5 }]);
+  it("suma ingresos/gastos y cuenta movimientos (aritmética en SQL simulada)", async () => {
+    const db = mockDb([
+      { kind: "ingreso", currency: "PEN", total: "1200.50", n: 3 },
+      { kind: "gasto", currency: "PEN", total: "840.00", n: 2 }
+    ]);
     const caller = callerWith(db);
-    const res = await caller.finance.monthSummary({ tenant: "demo", month: "2026-08" });
+    const res = await caller.finance.filteredSummary({ tenant: "demo" });
     expect(res.ingresos).toBe(1200.5);
     expect(res.gastos).toBe(840);
     expect(res.balance).toBe(360.5);
-    expect(res.empty).toBe(false);
+    expect(res.count).toBe(5);
   });
 
   it("modo Todas (sin tenant): byTenant con moneda por finca, sin mezclar", async () => {
-    const db = mockDb([
-      { tenant: "demo", currency: "PEN", ingresos: "100", gastos: "40", count: 3 },
-      { tenant: "ica", currency: "USD", ingresos: "200", gastos: "50", count: 2 }
-    ]);
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [] }) // totales planos (no se usan en modo Todas)
+        .mockResolvedValueOnce({ rows: [
+          { tenant: "demo", currency: "PEN", ingresos: "100", gastos: "40", n: 3 },
+          { tenant: "ica", currency: "USD", ingresos: "200", gastos: "50", n: 2 }
+        ] })
+    } as unknown as never;
     const caller = callerWith(db);
-    const res = await caller.finance.monthSummary({});
-    // Nunca se suma global (monedas distintas): los planos quedan a cero
-    expect(res.ingresos).toBe(0);
+    const res = await caller.finance.filteredSummary({});
     expect(res.byTenant).toHaveLength(2);
     expect(res.byTenant[0]).toMatchObject({ tenant: "demo", currency: "PEN", balance: 60 });
     expect(res.byTenant[1]).toMatchObject({ tenant: "ica", currency: "USD", balance: 150 });
-    expect(res.empty).toBe(false);
+  });
+
+  it("overhead declarado solo cuando hay filtro de imputación (nunca prorrateado)", async () => {
+    const db = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ kind: "gasto", currency: "PEN", total: "80", n: 2 }] }) // totales del lote
+        .mockResolvedValueOnce({ rows: [{ total: "320" }] }) // overhead finca
+        .mockResolvedValueOnce({ rows: [{ yield_kg: "40" }] }) // yield del lote
+    } as unknown as never;
+    const caller = callerWith(db);
+    const res = await caller.finance.filteredSummary({ tenant: "demo", batch: "LOTE-0006" });
+    expect(res.overhead).toBe(320);
+    expect(res.yield_kg).toBe(40);
+    expect(res.costo_por_kg).toBe(2); // 80/40 en código; null honesto sin yield
+  });
+
+  it("sin filtro de imputación no consulta overhead", async () => {
+    const db = mockDb([{ kind: "gasto", currency: "PEN", total: "10", n: 1 }]);
+    const caller = callerWith(db);
+    const res = await caller.finance.filteredSummary({ tenant: "demo" });
+    expect(res.overhead).toBeNull();
   });
 
   it("maneja error de DB con estado vacío honesto", async () => {
     const db = { execute: vi.fn().mockRejectedValue(new Error("db down")) } as unknown as never;
     const caller = callerWith(db);
-    const res = await caller.finance.monthSummary({ tenant: "demo" });
-    expect(res.empty).toBe(true);
+    const res = await caller.finance.filteredSummary({ tenant: "demo" });
     expect(res.balance).toBe(0);
     expect(res.byTenant).toEqual([]);
   });

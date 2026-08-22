@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { Plus, Sprout, X, Boxes } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "../trpc.ts";
 import { useTenant } from "@/components/tenant-provider.tsx";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
@@ -14,7 +16,12 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger
 } from "@/components/ui/dialog.tsx";
-import { formatDateTime, formatDay, formatShort, timeAgo } from "@/lib/format.ts";
+import {
+  Drawer, DrawerContent, DrawerDescription, DrawerFooter, DrawerHeader, DrawerTitle, DrawerTrigger
+} from "@/components/ui/drawer.tsx";
+import { useIsMobile } from "@/hooks/use-mobile.ts";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.tsx";
+import { formatDateTime, formatDay, formatMoney, formatShort, timeAgo } from "@/lib/format.ts";
 import { cn } from "@/lib/utils.ts";
 
 // ── Lotes de producción (ADR-0024) ──────────────────────────────────────────
@@ -75,6 +82,8 @@ function daysOf(lote: Lote): { elapsed: number; total: number | null; pct: numbe
 
 export function ProduccionPage() {
   const { active, farmName } = useTenant();
+  const queryClient = useQueryClient();
+  const [fichaLote, setFichaLote] = useState<Lote | null>(null); // ficha del ciclo sobrevive al desmontaje de la tarjeta
   const { data: lotes, isLoading } = useQuery({
     queryKey: ["batches.list", active],
     queryFn: () => trpc.batches.list.query({ tenant: active ?? undefined }),
@@ -206,9 +215,13 @@ export function ProduccionPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           {open.length === 0 && (
-            <p className="text-sm text-muted-foreground">
-              Nada en producción. Un lote nace cuando trasplantas, compras o siembras — y muere con la cosecha.
-            </p>
+            <Empty className="border border-dashed py-8">
+              <EmptyHeader>
+                <EmptyMedia variant="icon"><Sprout /></EmptyMedia>
+                <EmptyTitle>Nada en producción</EmptyTitle>
+                <EmptyDescription>Un lote nace cuando trasplantas, compras o siembras — y muere con la cosecha.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           )}
           {open.map((l) => {
             const d = daysOf(l);
@@ -255,12 +268,22 @@ export function ProduccionPage() {
                         : `día ${d.elapsed} de ${d.total} · ${d.pct}% · cosecha ${l.expectedEndAt ? formatDay(l.expectedEndAt) : ""}`
                       : `día ${d.elapsed} · sin fin estimado`}
                 </p>
-                <CerrarLoteDialog lote={l} />
+                <CerrarLoteDialog lote={l} onClosed={(loteCerrado) => setFichaLote(loteCerrado)} />
               </div>
             );
           })}
         </CardContent>
       </Card>
+
+      {/* Ficha del ciclo (nivel página: sobrevive al cierre de la tarjeta del lote) */}
+      <FichaCicloDialog
+        lote={fichaLote}
+        onClose={() => {
+          setFichaLote(null);
+          queryClient.invalidateQueries({ queryKey: ["batches.list"] });
+          queryClient.invalidateQueries({ queryKey: ["overview.kpis"] });
+        }}
+      />
 
       {/* Ocupación de módulos: la regla física hecha visible */}
       <Card>
@@ -270,7 +293,13 @@ export function ProduccionPage() {
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {visibleModules.length === 0 && (
-            <p className="text-sm text-muted-foreground">Sin módulos activos en esta finca.</p>
+            <Empty className="border border-dashed py-8 sm:col-span-2 lg:col-span-3">
+              <EmptyHeader>
+                <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
+                <EmptyTitle>Sin módulos activos en esta finca</EmptyTitle>
+                <EmptyDescription>Crea el primero desde Módulos para poder abrir lotes.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           )}
           {visibleModules.map((m) => {
             const lote = occupancy.get(`${m.tenant}/${m.id}`);
@@ -353,6 +382,7 @@ export function ProduccionPage() {
 
 // ── Diálogo: abrir lote ─────────────────────────────────────────────────────
 function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
+  const isMobile = useIsMobile();
   const queryClient = useQueryClient();
   const { active, tenants, farmName } = useTenant();
   const [open, setOpen] = useState(false);
@@ -427,43 +457,51 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
   const valid = targetFarm.length > 0 && crop.length > 0 && selected.length > 0 && !endInvalid;
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button size="sm" />}>
+    <Drawer open={open} onOpenChange={setOpen} swipeDirection={isMobile ? "down" : "right"} showSwipeHandle={isMobile}>
+      <DrawerTrigger render={<Button size="sm" />}>
         <Plus className="size-4" /> Abrir lote
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Abrir lote de producción</DialogTitle>
-          <DialogDescription>
+      </DrawerTrigger>
+      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-lg max-h-[92dvh]">
+        <DrawerHeader>
+          <DrawerTitle>Abrir lote de producción</DrawerTitle>
+          <DrawerDescription>
             Tú defines cuándo empieza el ciclo: hoy por defecto, una fecha pasada si
             registras tarde, o futura si estás programando. La cosecha tentativa sale
             del perfil del cultivo y puedes ajustarla.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3 py-2">
+          </DrawerDescription>
+        </DrawerHeader>
+        <div className="flex-1 overflow-y-auto space-y-3 px-4 py-3">
           {active === null && (
             <label className="block space-y-1">
               <span className="text-xs font-medium">Finca</span>
-              <select
+              <Select
+                items={tenants.map((t) => ({ label: t.name, value: t.id }))}
                 value={farmId}
-                onChange={(e) => { setFarmId(e.target.value); setSelected([]); }}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                onValueChange={(v) => { setFarmId(v as string); setSelected([]); }}
               >
-                <option value="" disabled>elige finca…</option>
-                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
+                <SelectTrigger className="w-full h-9 text-sm">
+                  <SelectValue placeholder="elige finca…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {tenants.map((t) => <SelectItem key={t.id} value={t.id} className="text-sm">{t.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </label>
           )}
           <label className="block space-y-1">
             <span className="text-xs font-medium">Cultivo / programa</span>
-            <select
+            <Select
+              items={(crops ?? []).map((c) => ({ label: c, value: c }))}
               value={crop}
-              onChange={(e) => { setCrop(e.target.value); setSelected([]); }}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              onValueChange={(v) => { setCrop(v as string); setSelected([]); }}
             >
-              <option value="" disabled>elige cultivo…</option>
-              {(crops ?? []).map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+              <SelectTrigger className="w-full h-9 text-sm">
+                <SelectValue placeholder="elige cultivo…" />
+              </SelectTrigger>
+              <SelectContent>
+                {(crops ?? []).map((c) => <SelectItem key={c} value={c} className="text-sm">{c}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </label>
           {crop && targetFarm && (
             <div className="space-y-1">
@@ -538,13 +576,13 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
             <Textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="trasplante de semillero propio" rows={2} />
           </label>
         </div>
-        <DialogFooter>
+        <DrawerFooter>
           <Button onClick={() => openMut.mutate()} disabled={!valid || openMut.isPending}>
             {openMut.isPending ? "Abriendo…" : "Abrir lote"}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </DrawerFooter>
+      </DrawerContent>
+    </Drawer>
   );
 }
 
@@ -592,63 +630,166 @@ function RetirarModuloDialog({ lote, moduleId, moduleName }: { lote: Lote; modul
 }
 
 // ── Diálogo: cerrar lote ────────────────────────────────────────────────────
-function CerrarLoteDialog({ lote }: { lote: Lote }) {
-  const queryClient = useQueryClient();
+function CerrarLoteDialog({ lote, onClosed }: { lote: Lote; onClosed: (lote: Lote) => void }) {
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
+  const [yieldKg, setYieldKg] = useState("");
   const [note, setNote] = useState("");
 
   const closeMut = useMutation({
-    mutationFn: () => trpc.batches.close.mutate({ id: lote.id, reason: reason as "cosecha" | "venta" | "perdida" | "otro", note: note.trim() || undefined }),
+    mutationFn: () => trpc.batches.close.mutate({
+      id: lote.id,
+      reason: reason as "cosecha" | "venta" | "perdida" | "otro",
+      yield_kg: yieldKg.trim() ? Number(yieldKg) : undefined,
+      note: note.trim() || undefined
+    }),
     onSuccess: () => {
-      toast.success("Lote cerrado", { description: `${lote.code} · ${reason}` });
-      queryClient.invalidateQueries({ queryKey: ["batches.list"] });
-      queryClient.invalidateQueries({ queryKey: ["overview.kpis"] });
+      toast.success("Lote cerrado", { description: `${lote.code} · ${reason}${yieldKg ? ` · ${yieldKg} kg` : ""}` });
       setOpen(false);
-      setReason(""); setNote("");
+      setReason(""); setYieldKg(""); setNote("");
+      onClosed(lote); // la ficha del ciclo vive a nivel página (la tarjeta se desmonta al cerrar)
     },
     onError: (err) => toast.error("No se pudo cerrar", { description: (err as Error).message })
   });
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button size="sm" variant="ghost" />}>
+    <Drawer open={open} onOpenChange={setOpen} swipeDirection={isMobile ? "down" : "right"} showSwipeHandle={isMobile}>
+      <DrawerTrigger render={<Button size="sm" variant="ghost" />}>
         <X className="size-3.5" />
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Cerrar {lote.code}</DialogTitle>
-          <DialogDescription>
+      </DrawerTrigger>
+      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-md max-h-[92dvh]">
+        <DrawerHeader>
+          <DrawerTitle>Cerrar {lote.code}</DrawerTitle>
+          <DrawerDescription>
             {lote.crop} · {lote.modules.map((m) => m.name).join(", ")} · abierto {timeAgo(lote.startedAt)}.
             La razón de cierre es el dato que alimenta el margen y el aprendizaje entre ciclos.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3 py-2">
+          </DrawerDescription>
+        </DrawerHeader>
+        <div className="flex-1 overflow-y-auto space-y-3 px-4 py-3">
           <label className="block space-y-1">
             <span className="text-xs font-medium">Razón de cierre</span>
-            <select
+            <Select
+              items={[
+                { label: "cosecha — ciclo completado", value: "cosecha" },
+                { label: "venta — salida comercial (pecuario)", value: "venta" },
+                { label: "pérdida — el ciclo fracasó", value: "perdida" },
+                { label: "otro", value: "otro" },
+              ]}
               value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              onValueChange={(v) => setReason(v as string)}
             >
-              <option value="" disabled>elige razón…</option>
-              <option value="cosecha">cosecha — ciclo completado</option>
-              <option value="venta">venta — salida comercial (pecuario)</option>
-              <option value="perdida">pérdida — el ciclo fracasó</option>
-              <option value="otro">otro</option>
-            </select>
+              <SelectTrigger className="w-full h-9 text-sm">
+                <SelectValue placeholder="elige razón…" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cosecha" className="text-sm">cosecha — ciclo completado</SelectItem>
+                <SelectItem value="venta" className="text-sm">venta — salida comercial (pecuario)</SelectItem>
+                <SelectItem value="perdida" className="text-sm">pérdida — el ciclo fracasó</SelectItem>
+                <SelectItem value="otro" className="text-sm">otro</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs font-medium">Kg cosechados <span className="text-muted-foreground font-normal">(opcional — habilita costo-por-kg)</span></span>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={yieldKg}
+              onChange={(e) => setYieldKg(e.target.value)}
+              placeholder="Ej: 42.5 — déjalo vacío si no hay báscula"
+            />
           </label>
           <label className="block space-y-1">
             <span className="text-xs font-medium">Nota (opcional)</span>
-            <Textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="rendimiento, kg cosechados, observaciones" rows={2} />
+            <Textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="observaciones del ciclo" rows={2} />
           </label>
         </div>
-        <DialogFooter>
+        <DrawerFooter>
           <Button variant="destructive" onClick={() => closeMut.mutate()} disabled={!reason || closeMut.isPending}>
             {closeMut.isPending ? "Cerrando…" : "Cerrar lote"}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </DrawerFooter>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+// ── Diálogo: ficha financiera del ciclo (post-cierre, nivel página) ─────────
+function FichaCicloDialog({ lote, onClose }: { lote: Lote | null; onClose: () => void }) {
+  const isMobile = useIsMobile();
+  const navigate = useNavigate();
+  const { data: ficha, isFetching } = useQuery({
+    queryKey: ["finance.filteredSummary", "batch-ficha", lote?.code],
+    queryFn: () => trpc.finance.filteredSummary.query({ tenant: lote!.tenant, batch: lote!.code, includeVoided: true }),
+    enabled: Boolean(lote)
+  });
+
+  return (
+    <Drawer open={Boolean(lote)} onOpenChange={(v) => !v && onClose()} swipeDirection={isMobile ? "down" : "right"} showSwipeHandle={isMobile}>
+      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-md max-h-[92dvh]">
+        {lote && (
+          <>
+            <DrawerHeader>
+              <DrawerTitle>{lote.code} cerrado — ficha del ciclo</DrawerTitle>
+              <DrawerDescription>
+                {lote.crop} · {lote.modules.map((m) => m.name).join(", ")} · {timeAgo(lote.startedAt)} de ciclo.
+                Solo imputación directa; los gastos generales de finca se declaran aparte.
+              </DrawerDescription>
+            </DrawerHeader>
+            <div className="flex-1 overflow-y-auto px-4 py-3">
+            {isFetching || !ficha ? (
+              <div className="py-6 space-y-2">
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-2/3" />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2 py-2 text-sm">
+                <div className="bg-muted/40 rounded-lg p-3">
+                  <p className="text-[11px] text-muted-foreground">Gasto del ciclo</p>
+                  <p className="font-mono font-bold text-red-600 dark:text-red-400">-{formatMoney(ficha.gastos, ficha.currency)}</p>
+                </div>
+                <div className="bg-muted/40 rounded-lg p-3">
+                  <p className="text-[11px] text-muted-foreground">Ingreso del ciclo</p>
+                  <p className="font-mono font-bold text-emerald-600 dark:text-emerald-400">+{formatMoney(ficha.ingresos, ficha.currency)}</p>
+                </div>
+                <div className="bg-muted/40 rounded-lg p-3">
+                  <p className="text-[11px] text-muted-foreground">Margen</p>
+                  <p className={`font-mono font-bold ${ficha.balance >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                    {ficha.balance >= 0 ? "+" : ""}{formatMoney(ficha.balance, ficha.currency)}
+                  </p>
+                </div>
+                <div className="bg-muted/40 rounded-lg p-3">
+                  <p className="text-[11px] text-muted-foreground">Costo por kg</p>
+                  <p className="font-mono font-bold">
+                    {ficha.costo_por_kg != null ? `${formatMoney(ficha.costo_por_kg, ficha.currency)}/kg` : "—"}
+                  </p>
+                  {ficha.costo_por_kg == null && (
+                    <p className="text-[10px] text-muted-foreground">sin rendimiento declarado</p>
+                  )}
+                </div>
+                {ficha.overhead != null && ficha.overhead > 0 && (
+                  <p className="col-span-2 text-[11px] text-muted-foreground">
+                    Gastos generales de finca del período no imputados: {formatMoney(ficha.overhead, ficha.currency)} (no se prorratean).
+                  </p>
+                )}
+              </div>
+            )}
+            </div>
+            <DrawerFooter className="gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { onClose(); navigate({ to: "/finanzas", search: { lote: lote.code } }); }}
+              >
+                Ver en Finanzas
+              </Button>
+              <Button size="sm" onClick={onClose}>Listo</Button>
+            </DrawerFooter>
+          </>
+        )}
+      </DrawerContent>
+    </Drawer>
   );
 }

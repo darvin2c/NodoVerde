@@ -41,6 +41,7 @@ status: vigente
 - Auto-registro desde actuadores (dosificación → gasto en nutrientes). El agente se auto-contabiliza (tokens → categoría `software`).
 - Historia inmutable: corrección por anulación + nuevo movimiento.
 - **Criterio de salida:** costo por kg de la cosecha consultable por chat ("¿cuánto costó la lechuga del módulo 2?").
+- Implementado 2026-08-22 (ADR-0027 + addendum): captura omnicanal con evidencia MinIO y traza completa (canal/autor/raw_payload), imputación en montos con snapshot de lote, edición gobernada (anular+recrear), `/finanzas` con filtros campaña→lote→módulo en cascada, búsqueda, paginación, agrupación con subtotales, export CSV, overhead declarado (no prorrateado), proveedor, y `lotes.yield_kg` al cerrar → costo-por-kg determinístico (`cost_summary` batch / ficha de cierre en Producción).
 
 ### Fase 3 — Lazo cerrado con actuadores
 - Policy module activo: agente propone (o humano pide desde HA), portero valida, aprobación por chat, ejecución, audit.
@@ -53,6 +54,7 @@ status: vigente
 ### Fase 4 — Campaña con pausas honestas (ADR-0021)
 - Simulador una temporada completa (ciclo lechuga ~45 días **de reloj sim**). Admite apagados declarados en workstation: pausas totales nocturnas + una caída parcial semanal del sim con stack vivo — las pausas son parte del protocolo (matriz de degradación ADR-0010), no violaciones.
 - Prerequisitos de código (verificables acelerado): catch-up del sim al reanudar (el mundo vive la pausa, el reloj se resincroniza), alerta `data_gap` en watchdog, alerta `cmd_sin_policy` en router, cron de tokens determinístico, tabla `lotes` + `open/close_batch` (ADR-0024: el ciclo biológico es la entidad; la campaña es etiqueta lógica), chequeo `invariant_ledger` en finance.
+- Captura financiera omnicanal (ADR-0027): dos niveles (finca/módulos) con lote derivado en snapshot, imputación en montos, traza de procedencia (`channel`, `raw_payload`, `occurred_at`), evidencia multi-archivo en MinIO con dedup por hash, `MOV-NNNN` + `external_ref`, edición = anulación + recreación, y formulario PWA como tercera puerta del mismo dueño (`services/finance`).
 - Invariantes, cada una validada por su dueño y publicada al topic `alert` con estado pendiente/resuelta: finance → imputación 100%; router → cero comandos sin policy; cron → presupuesto de tokens (techo USD/mes).
 - **Criterio de salida:** temporada completa (lotes sucesivos del sim, ADR-0024) con **cero alertas de invariante sin resolver al cierre** (una alerta corregida no invalida).
 

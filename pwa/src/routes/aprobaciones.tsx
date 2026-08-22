@@ -2,6 +2,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { trpc } from "../trpc.ts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card.tsx";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty.tsx";
+import { Stamp, ClipboardList } from "lucide-react";
 import { Badge } from "@/components/ui/badge.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
@@ -69,7 +71,13 @@ export function AprobacionesPage() {
               <p className="text-sm text-destructive">portero inalcanzable: {(error as Error).message}</p>
             )}
             {!isLoading && !error && (!approvals || approvals.length === 0) && (
-              <p className="text-sm text-muted-foreground">Sin aprobaciones pendientes.</p>
+              <Empty className="border border-dashed py-8">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon"><Stamp /></EmptyMedia>
+                  <EmptyTitle>Sin aprobaciones pendientes</EmptyTitle>
+                  <EmptyDescription>El portero no tiene acciones esperando decisión humana.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             )}
             {approvals?.map((raw) => {
               const a = raw as Record<string, unknown>;
@@ -114,7 +122,13 @@ export function AprobacionesPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             {(!orders || orders.length === 0) && (
-              <p className="text-sm text-muted-foreground">Sin órdenes pendientes.</p>
+              <Empty className="border border-dashed py-8">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon"><ClipboardList /></EmptyMedia>
+                  <EmptyTitle>Sin órdenes pendientes</EmptyTitle>
+                  <EmptyDescription>Las órdenes de trabajo ejecutadas o canceladas quedan en el historial del portero.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             )}
             {orders?.map((raw) => {
               const o = raw as Record<string, unknown>;
