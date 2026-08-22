@@ -461,7 +461,7 @@ function AbrirLoteDialog({ openLotes }: { openLotes: Lote[] }) {
       <DrawerTrigger render={<Button size="sm" />}>
         <Plus className="size-4" /> Abrir lote
       </DrawerTrigger>
-      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-lg max-h-[92dvh]">
+      <DrawerContent>
         <DrawerHeader>
           <DrawerTitle>Abrir lote de producción</DrawerTitle>
           <DrawerDescription>
@@ -658,7 +658,7 @@ function CerrarLoteDialog({ lote, onClosed }: { lote: Lote; onClosed: (lote: Lot
       <DrawerTrigger render={<Button size="sm" variant="ghost" />}>
         <X className="size-3.5" />
       </DrawerTrigger>
-      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-md max-h-[92dvh]">
+      <DrawerContent>
         <DrawerHeader>
           <DrawerTitle>Cerrar {lote.code}</DrawerTitle>
           <DrawerDescription>
@@ -728,7 +728,7 @@ function FichaCicloDialog({ lote, onClose }: { lote: Lote | null; onClose: () =>
 
   return (
     <Drawer open={Boolean(lote)} onOpenChange={(v) => !v && onClose()} swipeDirection={isMobile ? "down" : "right"} showSwipeHandle={isMobile}>
-      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-md max-h-[92dvh]">
+      <DrawerContent>
         {lote && (
           <>
             <DrawerHeader>

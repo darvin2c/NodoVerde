@@ -383,15 +383,17 @@ export function MovementFormDialog({ open, mode, initialData, onClose, onSuccess
   if (!active) {
     return (
       <Drawer open={open} onOpenChange={(val) => !val && onClose()} swipeDirection={isMobile ? "down" : "right"} showSwipeHandle={isMobile}>
-        <DrawerContent className="data-[swipe-axis=x]:sm:max-w-md text-center space-y-3 p-6">
-          <AlertTriangle className="mx-auto h-10 w-10 text-amber-500" />
-          <DrawerTitle className="text-base">Selecciona una finca</DrawerTitle>
-          <DrawerDescription className="text-xs">
-            Debes seleccionar una finca específica en el menú superior para registrar un movimiento financiero.
-          </DrawerDescription>
-          <Button variant="outline" size="sm" onClick={onClose}>
-            Entendido
-          </Button>
+        <DrawerContent>
+          <div className="space-y-3 p-4 text-center">
+            <AlertTriangle className="mx-auto h-10 w-10 text-amber-500" />
+            <DrawerTitle className="text-base">Selecciona una finca</DrawerTitle>
+            <DrawerDescription className="text-xs">
+              Debes seleccionar una finca específica en el menú superior para registrar un movimiento financiero.
+            </DrawerDescription>
+            <Button variant="outline" size="sm" onClick={onClose}>
+              Entendido
+            </Button>
+          </div>
         </DrawerContent>
       </Drawer>
     );
@@ -399,8 +401,8 @@ export function MovementFormDialog({ open, mode, initialData, onClose, onSuccess
 
   return (
     <Drawer open={open} onOpenChange={(val) => !val && onClose()} swipeDirection={isMobile ? "down" : "right"} showSwipeHandle={isMobile}>
-      <DrawerContent className="data-[swipe-axis=x]:sm:max-w-lg max-h-[92dvh] overflow-y-auto p-6">
-        <DrawerHeader className="px-0">
+      <DrawerContent>
+        <DrawerHeader>
           <DrawerTitle className="text-base flex items-center gap-2">
             {mode === "create" ? (
               <>
@@ -417,6 +419,8 @@ export function MovementFormDialog({ open, mode, initialData, onClose, onSuccess
           </DrawerDescription>
         </DrawerHeader>
 
+        <form onSubmit={(e) => handleSubmit(e, false)} className="flex flex-1 min-h-0 flex-col">
+        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-2">
         {/* Warning de duplicado si ocurre */}
         {possibleDuplicate && (
           <div className="border border-amber-500/50 bg-amber-500/10 text-amber-950 dark:text-amber-200 p-3 rounded-lg text-xs flex gap-2">
@@ -452,7 +456,6 @@ export function MovementFormDialog({ open, mode, initialData, onClose, onSuccess
           </div>
         )}
 
-        <form onSubmit={(e) => handleSubmit(e, false)} className="space-y-4 py-2">
           {/* Toggle Gasto / Ingreso */}
           <div className="grid grid-cols-2 gap-2 p-1 bg-muted rounded-lg">
             <button
@@ -848,7 +851,8 @@ export function MovementFormDialog({ open, mode, initialData, onClose, onSuccess
             )}
           </div>
 
-          <DrawerFooter className="gap-2 px-0 pt-2">
+          </div>
+          <DrawerFooter className="flex-row gap-2">
             <Button type="button" variant="outline" size="sm" onClick={onClose}>
               Cancelar
             </Button>

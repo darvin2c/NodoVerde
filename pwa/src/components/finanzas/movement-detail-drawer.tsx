@@ -8,6 +8,7 @@ import {
   DrawerHeader,
   DrawerTitle,
   DrawerDescription,
+  DrawerFooter,
 } from "@/components/ui/drawer.tsx";
 import { useIsMobile } from "@/hooks/use-mobile.ts";
 import { Badge } from "@/components/ui/badge.tsx";
@@ -163,21 +164,21 @@ export function MovementDetailDrawer({ movementId, onClose, onEdit, onVoid }: Pr
       showSwipeHandle={isMobile}
       swipeDirection={isMobile ? "down" : "right"}
     >
-      <DrawerContent className="data-[swipe-axis=x]:w-full data-[swipe-axis=x]:sm:max-w-md max-h-[92dvh] flex flex-col p-0">
+      <DrawerContent>
         <DrawerHeader className="sr-only">
           <DrawerTitle>Detalle del movimiento</DrawerTitle>
           <DrawerDescription>Trazabilidad, evidencias y acciones del movimiento seleccionado.</DrawerDescription>
         </DrawerHeader>
         {isLoading || !mov ? (
-          <div className="p-6 space-y-4">
+          <div className="p-4 space-y-4">
             <Skeleton className="h-8 w-40" />
             <Skeleton className="h-12 w-full" />
             <Skeleton className="h-40 w-full" />
           </div>
         ) : (
-          <div className="flex-1 flex flex-col">
+          <>
             {/* Header decorativo */}
-            <div className="p-6 bg-muted/30 border-b space-y-3">
+            <div className="p-4 bg-muted/30 border-b space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-sm font-bold text-muted-foreground">
@@ -214,7 +215,7 @@ export function MovementDetailDrawer({ movementId, onClose, onEdit, onVoid }: Pr
             </div>
 
             {/* Contenido scrolleable */}
-            <div className="p-6 space-y-6 flex-1">
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
               {/* Sección 1: Datos principales */}
               <div className="space-y-3">
                 <h4 className="text-xs font-semibold uppercase text-muted-foreground tracking-wider flex items-center gap-1.5">
@@ -468,9 +469,9 @@ export function MovementDetailDrawer({ movementId, onClose, onEdit, onVoid }: Pr
               )}
             </div>
 
-            {/* Sticky Actions Bar */}
+            {/* Acciones */}
             {canModify && movementItem && (
-              <div className="p-4 border-t bg-background sticky bottom-0 flex gap-2">
+              <DrawerFooter className="flex-row gap-2 border-t">
                 <Button
                   variant="outline"
                   size="sm"
@@ -487,9 +488,9 @@ export function MovementDetailDrawer({ movementId, onClose, onEdit, onVoid }: Pr
                 >
                   <Trash2 className="h-3.5 w-3.5" /> Anular
                 </Button>
-              </div>
+              </DrawerFooter>
             )}
-          </div>
+          </>
         )}
       </DrawerContent>
     </Drawer>
