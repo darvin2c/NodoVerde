@@ -22,7 +22,8 @@ terraOS: agente autónomo de gestión agrícola integral (financiero + operacion
 ```bash
 cp .env.example .env
 ./brain/setup.sh                          # genera brain/openclaw.json (token hooks) desde template
-docker compose up -d --wait              # data plane + watchdog + confidence + mcp-domain + finance + policy (portero) + bridge + token-meter + pwa (+ openclaw si hay API key)
+docker compose up -d --wait                                  # solo base (broker, DB, MinIO, Telegraf)
+docker compose --profile cerebro --profile ui --profile lab up -d --wait   # stack completo (cerebro + PWA + HA + Grafana + lab)
 docker compose up -d openclaw            # cerebro: imagen oficial ghcr pineada (ADR-0018), sin build
 ./brain/automations.sh                   # automations de agentes (ADR-0019; --channel <C> --to <D> añade reporte diario)
 cd router && pnpm install && pnpm dev    # router de identidad (ADR-0015) — traduce plano dispositivo ↔ interno + enforcement cmd (ADR-0020)

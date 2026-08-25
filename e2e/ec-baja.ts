@@ -8,7 +8,7 @@
  *   - propuesta: MCP terra-policy propose_action (el camino real del cerebro)
  *   - aprobación: HTTP POST /api/approvals/{id}/approve con POLICY_ADMIN_TOKEN (el camino del botón PWA)
  *
- * Precondiciones: `docker compose up -d` (con policy, watchdog, finance, router por host) y
+ * Precondiciones: `docker compose --profile cerebro up -d` (policy, watchdog, finance) + router por host) y
  * sim corriendo (`cd sim && pnpm dev -- --offline --speed 240`). Speed alto recomendado (≥240):
  * a 1× la caída de EC hasta el piso tarda horas reales. El script conmuta el escenario
  * a ec_baja vía ctl y lo restaura a normal al final.
