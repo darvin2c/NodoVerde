@@ -1,20 +1,38 @@
 {
   "title": "Terra Overview",
   "uid": "terra-overview",
-  "tags": ["terraos"],
+  "tags": [
+    "terraos"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 2,
   "refresh": "10s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "panels": [
     {
       "id": 1,
       "title": "EC mS/cm por modulo",
       "type": "timeseries",
-      "datasource": { "type": "postgres", "uid": "timescale" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "si:mS/cm" }, "overrides": [] },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescale"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "si:mS/cm"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'ec' AND $__timeFilter(time) ORDER BY time",
@@ -28,9 +46,24 @@
       "id": 2,
       "title": "pH por modulo",
       "type": "timeseries",
-      "datasource": { "type": "postgres", "uid": "timescale" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 14 }, "overrides": [] },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescale"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 14
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'ph' AND $__timeFilter(time) ORDER BY time",
@@ -44,9 +77,24 @@
       "id": 3,
       "title": "Nivel tanque %",
       "type": "timeseries",
-      "datasource": { "type": "postgres", "uid": "timescale" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescale"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'level' AND $__timeFilter(time) ORDER BY time",
@@ -60,9 +108,22 @@
       "id": 4,
       "title": "Temp aire °C",
       "type": "timeseries",
-      "datasource": { "type": "postgres", "uid": "timescale" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "fieldConfig": { "defaults": { "unit": "celsius" }, "overrides": [] },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescale"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "rawSql": "SELECT time, module AS metric, value FROM telemetry WHERE metric = 'air_temp' AND $__timeFilter(time) ORDER BY time",
@@ -76,8 +137,16 @@
       "id": 5,
       "title": "Confianza por módulo (%)",
       "type": "gauge",
-      "datasource": { "type": "postgres", "uid": "timescale" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescale"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -86,9 +155,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": 0 },
-              { "color": "yellow", "value": 50 },
-              { "color": "green", "value": 80 }
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
             ]
           }
         },
@@ -113,22 +191,38 @@
       "id": 6,
       "title": "Alertas recientes",
       "type": "table",
-      "datasource": { "type": "postgres", "uid": "timescale" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "datasource": {
+        "type": "postgres",
+        "uid": "timescale"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
       "options": {
-        "sortBy": [{ "displayName": "time", "desc": true }],
+        "sortBy": [
+          {
+            "displayName": "time",
+            "desc": true
+          }
+        ],
         "cellHeight": "sm"
       },
       "targets": [
         {
-          "rawSql": "SELECT time, tenant, module, name, severity, device, detail::text AS detail FROM alerts WHERE $__timeFilter(time) ORDER BY time DESC LIMIT 20",
+          "rawSql": "SELECT time, tenant, module, name, severity, device, detail::text AS detail FROM alerts WHERE $__timeFilter(time) ORDER BY time DESC LIMIT 50",
           "format": "table",
           "editorMode": "code",
           "refId": "A"
         }
       ],
-      "description": "Últimas 20 alertas del watchdog (plano plataforma 4-seg terra/{tenant}/{module}/alert). Severidad info/warn/critical."
+      "description": "Últimas 50 alertas del dominio (watchdog: salud + rangos de cultivo ADR-0028; router/finance/token-meter: invariantes). Grafana solo visualiza — cero evaluación."
     }
   ]
 }

@@ -4,7 +4,7 @@
     "defaults": {
       "workspace": "/home/node/.openclaw/workspaces/main",
       "subagents": {
-        "allowAgents": ["experto-lechuga", "experto-tomate"]
+        "allowAgents": []
       }
     },
     "list": [
@@ -12,24 +12,6 @@
         "id": "main",
         "default": true,
         "identity": { "name": "Orquestador terraOS" }
-      },
-      {
-        "id": "experto-lechuga",
-        "name": "Experto Lechuga",
-        "workspace": "/home/node/.openclaw/workspaces/experto-lechuga",
-        "skills": ["cultivo-lechuga"],
-        "tools": {
-          "deny": ["message", "exec", "process", "browser", "gateway", "sessions_spawn", "apply_patch"]
-        }
-      },
-      {
-        "id": "experto-tomate",
-        "name": "Experto Tomate",
-        "workspace": "/home/node/.openclaw/workspaces/experto-tomate",
-        "skills": ["cultivo-tomate"],
-        "tools": {
-          "deny": ["message", "exec", "process", "browser", "gateway", "sessions_spawn", "apply_patch"]
-        }
       }
     ]
   },
@@ -37,7 +19,7 @@
     "enabled": true,
     "path": "/hooks",
     "token": "${OPENCLAW_HOOK_TOKEN}",
-    "allowedAgentIds": ["main", "experto-lechuga", "experto-tomate"]
+    "allowedAgentIds": ["main"]
   },
   "mcp": {
     "servers": {

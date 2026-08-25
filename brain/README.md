@@ -12,9 +12,8 @@ Chat (Telegram / WhatsApp / WebChat — el que elijas; una sola voz al humano)
        │
        ├─ main (orquestador)  ← reporte-diario, oficina-activa, consulta a expertos
        │     ↑ sessions_spawn      ↑ hook (reportes de expertos, vía bridge)
-       ├─ experto-lechuga ──┐
-       ├─ experto-tomate ───┤ automation propia cada 6 h → webhook → bridge → main
-       │                    │
+       ├─ experto-<especie> ×N ┤ automation propia cada 6 h → webhook → bridge → main
+       │   (uno por especie de crop_profiles — los genera sync-experts.mjs, ADR-0028)
        └─ MCP terra-domain read-only (:7760/mcp)
 
   sim → router → MQTT → bridge (alerta → experto del cultivo; fallback main)
@@ -24,14 +23,14 @@ Chat (Telegram / WhatsApp / WebChat — el que elijas; una sola voz al humano)
 |---|---|---|
 | **Gateway** | Runtime, Control UI, scheduler, channels | imagen oficial `ghcr.io/openclaw/openclaw:2026.7.1-2` (ADR-0018, pineada por digest inmutable de tag) |
 | **Orquestador (`main`)** | Única voz al humano; coordina expertos con `sessions_spawn` | workspace `./brain/workspaces/main` |
-| **Expertos (`experto-<especie>`)** | Memoria y playbook por especie; revisión propia cada 6 h; reportan al orquestador, NUNCA al humano ni a actuadores | `./brain/workspaces/experto-<especie>/` |
+| **Expertos (`experto-<especie>`)** | Memoria y playbook por especie; revisión propia cada 6 h; reportan al orquestador, NUNCA al humano ni a actuadores. NO hay lista fija: se generan desde `crop_profiles` (una especie por perfil) vía `brain/sync-experts.mjs`. | `./brain/workspaces/experto-<especie>/` (generado desde `_template-experto/`) |
 | **Config** | `openclaw.json` (JSON plano, no expande env) | `openclaw.json.template` → `setup.sh` genera `openclaw.json` (mount ro) |
 | **Hooks** | Ingress bus → agentes: `POST /hooks/agent` `{message, name, agentId}` con Bearer `OPENCLAW_HOOK_TOKEN`; `allowedAgentIds` limita destinos | `hooks.enabled=true` |
 | **Bridge** | Alertas MQTT → experto del cultivo (lookup `modules.crop`, fallback `main`); `POST :7765/expert-report` recibe reportes de expertos → orquestador | `services/bridge/` |
-| **Automations** | Scheduler nativo: `revision-lechuga` (7 */6h), `revision-tomate` (37 */6h) → webhook al bridge; `reporte-diario` (07:00) → tu canal | `brain/automations.sh` (idempotente) |
+| **Automations** | Scheduler nativo: `revision-<especie>` (*/6h, minuto determinístico por especie) → webhook al bridge; `reporte-diario` (07:00) → tu canal | `brain/automations.sh` (corre `sync-experts.mjs` primero; idempotente) |
 | **MCP terra-domain** | Herramientas read-only: `get_farm_context`, `list_modules`, `get_crop_profile`, `latest_readings`, `telemetry_range`, `module_confidence`, `recent_alerts`, `daily_report_data` | `mcp.servers.terra-domain` |
 | **MCP terra-finance** | Ledger financiero (dueño de `movements`): `register_movement` ✏️, `void_movement` ✏️, `set_supply_cost` ✏️, `list_movements`, `cost_summary`, `list_supplies` | `mcp.servers.terra-finance` (`http://finance:7761/mcp`) |
-| **Portero (Fase 3)** | Gate de actuación: `terra-policy` MCP `:7762/mcp` + HTTP `:7762/healthz` y `/api/approvals` (PWA). Valida confianza/health/ventanas/techos/rate/serialización; publica `terra/{tenant}/{module}/{device}/cmd` solo si `policy_id` no vacío. Skills `aprobaciones` (gate humano) y `ordenes-trabajo` (tareas manuales) en `main`; expertos usan `propose_action` vía `terra-policy` (ver `cultivo-lechuga`/`cultivo-tomate` §6). | `services/policy/` · `mcp.servers.terra-policy` (`http://policy:7762/mcp`) · env `POLICY_ADMIN_TOKEN` (setup.sh) |
+| **Portero (Fase 3)** | Gate de actuación: `terra-policy` MCP `:7762/mcp` + HTTP `:7762/healthz` y `/api/approvals` (PWA). Valida confianza/health/ventanas/techos/rate/serialización; publica `terra/{tenant}/{module}/{device}/cmd` solo si `policy_id` no vacío. Skills `aprobaciones` (gate humano) y `ordenes-trabajo` (tareas manuales) en `main`; expertos usan `propose_action` vía `terra-policy` POR CLASE (`action_class`, sin device ids — ver `_template-experto/skills/cultivo-{{ESPECIE}}/SKILL.md` §6, ADR-0028). | `services/policy/` · `mcp.servers.terra-policy` (`http://policy:7762/mcp`) · env `POLICY_ADMIN_TOKEN` (setup.sh) |
 
 **Modelo y canal: agnósticos (ADR-0001).** El template no trae ninguno preconfigurado — el deployer elige post-boot con `openclaw config set agents.defaults.model.primary <proveedor/modelo>` y el canal correspondiente (`channels login` / `config set channels.<c>...`). WebChat (Control UI) funciona sin configurar nada.
 
@@ -49,8 +48,8 @@ Se usa la **imagen oficial pre-construida** — prohibido build desde fuente/for
 | 1 | `./brain/setup.sh` | Genera tokens en `.env` si faltan y `brain/openclaw.json` desde el template |
 | 2 | `docker compose up -d openclaw` | Pull de la imagen oficial y arranque del gateway |
 | 3 | `curl -i http://localhost:18789/healthz` · `docker compose exec openclaw node openclaw.mjs config validate` | Health + config contra schema |
-| 4 | `docker compose exec openclaw node openclaw.mjs agents list --bindings` | Debe listar `main`, `experto-lechuga`, `experto-tomate` |
-| 5 | `./brain/automations.sh --channel <CANAL> --to <DESTINO>` | Crea las 3 automations (idempotente; sin flags solo las de expertos) |
+| 4 | `docker compose exec openclaw node openclaw.mjs agents list --bindings` | Debe listar `main` (los expertos aparecen tras el paso 5 — los crea `sync-experts.mjs` desde `crop_profiles`) |
+| 5 | `./brain/automations.sh --channel <CANAL> --to <DESTINO>` | Corre `sync-experts.mjs` (expertos desde `crop_profiles`: workspaces + agents + crons `revision-<especie>`) y crea el reporte diario (idempotente; sin flags solo expertos) |
 | 6 | Configura tu LLM (`config set agents.defaults.model.primary …`) y tu canal (`channels login` o `config set channels.<c>…`) | Sin LLM los turnos fallan; sin canal, WebChat sigue disponible |
 | 7 | `./brain/automations.sh --channel … --to …` (si no lo hiciste en 5) | Reporte diario 07:00 a tu canal |
 
@@ -59,7 +58,7 @@ Se usa la **imagen oficial pre-construida** — prohibido build desde fuente/for
 ## Qué persiste y dónde
 
 - **Volumen `openclaw_state` → `/home/node/.openclaw`** — sesiones, pairing, automations, memoria de runtime. Sobrevive `docker compose down`; borrarlo resetea pairing y automations.
-- **`./brain/workspaces/` (un solo bind)** — un subdirectorio por agente (`main`, `experto-<especie>`): SOUL/skills/memoria semilla versionados en git. Nueva especie = `mkdir` + entrada en el template, sin tocar compose. Edita en el repo y reinicia el gateway.
+- **`./brain/workspaces/` (un solo bind)** — un subdirectorio por agente (`main`, `experto-<especie>`): SOUL/skills/memoria semilla versionados en git. Los workspaces de expertos son GENERADOS por `sync-experts.mjs` desde `_template-experto/` (SOUL/IDENTITY/TOOLS/skills se reescriben; `MEMORY.md` jamás se pisa — es memoria experiencial). Nueva especie = crear el perfil en la PWA y re-correr `./brain/automations.sh` (ADR-0028), sin tocar compose ni template.
 - **`./brain/openclaw.json` (bind rw anidado DESPUÉS del volumen)** — generado por `setup.sh` y **mutable en runtime**: `openclaw config set` persiste aquí (así se eligen LLM y canal). Estructura base = template; para resetear, re-ejecuta `setup.sh`.
 
 ```yaml
@@ -75,9 +74,9 @@ volumes:
 |---|---|
 | Gateway no responde en `18789` | `docker compose ps` → debe estar `healthy`; si no, `docker compose logs openclaw --tail 100`. El gateway corre con `--bind lan` + `gateway.auth` (obligatorio fuera de loopback). |
 | `config validate` falla | No inventes keys — las del template fueron verificadas. Revisa el template, re-ejecuta `setup.sh`. |
-| Experto no existe (`agents list`) | La entrada vive en `agents.list` del template + su workspace montado. Ambos en el mismo commit. |
+| Experto no existe (`agents list`) | Los expertos ya NO viven en el template: los genera `sync-experts.mjs` desde `crop_profiles` (ADR-0028). ¿Creaste el perfil y corriste `./brain/automations.sh`? Verifica `list_crop_profiles` vía MCP. |
 | Automation no corre | `docker compose exec openclaw node openclaw.mjs automations list` → revisa `nextRun`. Logs del run en el Control UI. El webhook exige que el bridge esté arriba (`http://bridge:7765`). |
-| Alerta no llega al experto | Log del bridge: `[bridge] hook OK (… agent=experto-lechuga)`. Si cae a `main`: el experto no existe o el hook lo rechazó. Verifica `hooks.allowedAgentIds`. |
+| Alerta no llega al experto | Log del bridge: `[bridge] hook OK (… agent=experto-lechuga)`. Si cae a `main`: el experto no existe o el hook lo rechazó. Verifica `hooks.allowedAgentIds`. ¿Corriste `automations.sh` tras crear el perfil? |
 | `hooks` 401 | Bearer debe ser `OPENCLAW_HOOK_TOKEN` (≠ `OPENCLAW_GATEWAY_TOKEN`). |
 | El canal no responde | Verifica la env de tu canal en `.env` y descomentada en `docker-compose.yml`; re-ejecuta `docker compose up -d openclaw`. Sin canal configurado el resto funciona igual (WebChat en :18789). |
 | Turnos fallan con "no model" / auth_error | No hay LLM configurado o la key es inválida: `docker compose exec openclaw node openclaw.mjs config set agents.defaults.model.primary <proveedor/modelo>` con la env del proveedor presente. |
@@ -94,6 +93,6 @@ brain/
   automations.sh             # automations idempotentes por agente (ADR-0019)
   workspaces/                # un subdirectorio por agente — un solo bind en compose
     main/                    # ORQUESTADOR: SOUL, AGENTS, skills reporte-diario/oficina-activa
-    experto-lechuga/         # SOUL + MEMORY + AGENTS + skills/cultivo-lechuga
-    experto-tomate/          # SOUL + MEMORY + AGENTS + skills/cultivo-tomate
+    _template-experto/       # plantilla genérica ({{ESPECIE}}) — fuente de los expertos
+    experto-<especie>/       # GENERADO por sync-experts.mjs (SOUL/skills reescritos; MEMORY.md experiencial, jamás se pisa)
 ```

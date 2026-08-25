@@ -13,7 +13,6 @@ export type Autonomy = "autonomous" | "supervised";
 export type ActionClass = "fill_water" | "dose_nutrient" | "dose_ph" | "recirculate";
 
 export interface ClassConfig {
-  devices: string[];
   autonomy: Autonomy;
   minConfidence: Record<string, number>;
   maxDurationMs?: number;
@@ -23,14 +22,12 @@ export interface ClassConfig {
 
 export const ACTION_CLASSES: Record<ActionClass, ClassConfig> = {
   fill_water: {
-    devices: ["valve-fill-01"],
     autonomy: "autonomous",
     minConfidence: { level: 80 },
     maxDurationMs: 120000,
     rateLimitMs: 600000,
   },
   dose_nutrient: {
-    devices: ["doser-a-01", "doser-b-01"],
     autonomy: "supervised",
     minConfidence: { ec: 70 },
     maxDurationMs: 10000,
@@ -38,7 +35,6 @@ export const ACTION_CLASSES: Record<ActionClass, ClassConfig> = {
     defaultDurationMs: 2000,
   },
   dose_ph: {
-    devices: ["doser-ph-01"],
     autonomy: "supervised",
     minConfidence: { ph: 70 },
     maxDurationMs: 8000,
@@ -46,30 +42,20 @@ export const ACTION_CLASSES: Record<ActionClass, ClassConfig> = {
     defaultDurationMs: 2000,
   },
   recirculate: {
-    devices: ["pump-recirc-01"],
     autonomy: "autonomous",
     minConfidence: { level: 50 },
     rateLimitMs: 60000,
   },
 };
 
-// Mapa dispositivo → clase
-export const DEVICE_TO_CLASS: Record<string, ActionClass> = {
-  "valve-fill-01": "fill_water",
-  "doser-a-01": "dose_nutrient",
-  "doser-b-01": "dose_nutrient",
-  "doser-ph-01": "dose_ph",
-  "pump-recirc-01": "recirculate",
+// Qué métrica observa cada clase (regla del portero, invariante — NO del despliegue).
+// El dispositivo sensor concreto se resuelve desde devices.capability (capabilities.ts).
+export const CLASS_OBSERVED_METRIC: Record<ActionClass, string> = {
+  fill_water: "level",
+  dose_nutrient: "ec",
+  dose_ph: "ph",
+  recirculate: "level",
 };
-
-// Mapa clase → sensorDevice para recolección (request/read cuando falta confianza)
-export const CLASS_SENSOR_DEVICE: Record<ActionClass, string> = {
-  fill_water: "level-01",
-  dose_nutrient: "ec-01",
-  dose_ph: "ph-01",
-  recirculate: "level-01",
-};
-
 // ---------------------------------------------------------------------------
 // Ventanas horarias (default 0-24, override por env POLICY_WINDOWS_JSON)
 // ---------------------------------------------------------------------------

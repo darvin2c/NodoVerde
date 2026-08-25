@@ -7,9 +7,6 @@ import { approveAction as policyApprove } from "./policy.js";
 import { POLICY_ADMIN_TOKEN } from "./config.js";
 import { getConfidence, getHealth } from "./state.js";
 import { checkConfidence, checkHealth } from "./rules.js";
-import { CLASS_SENSOR_DEVICE } from "./config.js";
-import type { ActionClass } from "./config.js";
-
 function json(res: ServerResponse, code: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });

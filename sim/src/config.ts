@@ -29,6 +29,8 @@ const CropSchema = z.object({
   ec_target: z.tuple([z.number(), z.number()]),
   ph_target: z.tuple([z.number(), z.number()]),
   water_temp: z.tuple([z.number(), z.number()]),
+  // duración del ciclo trasplante→cosecha (días) — se provisiona a crop_profiles.cycle_days (ADR-0028)
+  cycle_days: z.number().int().positive().optional(),
   notes: z.string().optional(),
 });
 

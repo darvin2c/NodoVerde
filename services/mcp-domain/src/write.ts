@@ -1,8 +1,10 @@
 // src/write.ts — pool de escritura gobernada (ADR-0024 + ADR-0022 + ADR-0023 + ADR-0025)
 // Única excepción al invariante read-only de db.ts.
-// Solo toca lotes, alert_resolutions, modules, device_identities, tenants y
+// Solo toca lotes, alert_resolutions, modules, device_identities, tenants, devices y
 // crop_profiles con statements explícitos INSERT/UPDATE. Telemetría sigue
-// read-only. Nada se borra: retiro/archivado/cierre = timestamp.
+// read-only. Nada se borra: retiro/archivado/cierre = timestamp. Excepción
+// gobernada (ADR-0028): unclaim_device hace DELETE en device_identities —
+// la identidad es asignación volátil de laboratorio; la historia queda.
 // ADR-0025: modules.crop es caché del lote — SOLO setModulesCropDb lo escribe,
 // llamado desde open_batch (pone) y close_batch (limpia a NULL = mesa libre).
 
@@ -411,24 +413,74 @@ export async function listModuleIdsDb(tenant: string): Promise<string[]> {
 }
 
 /** Inserta módulo LIBRE (sin cultivo — ADR-0025) con id mod-N autogenerado. Reintenta una vez ante race de creación concurrente. */
-export async function insertModuleDb(tenant: string, name: string): Promise<ModuleRow> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const ids = await listModuleIdsDb(tenant);
-    const id = nextModuleId(ids);
-    try {
-      const r = await writePool.query(
-        `INSERT INTO modules (tenant, id, name) VALUES ($1, $2, $3)
-         RETURNING tenant, id, name, crop, retired_at, created_at`,
-        [tenant, id, name],
-      );
-      return r.rows[0] as ModuleRow;
-    } catch (err) {
-      // Race: otro cliente tomó el mismo mod-N entre el SELECT y el INSERT → recalcular una vez
-      if (attempt === 0 && (err as { code?: string }).code === "23505") continue;
-      throw err;
+export async function insertModuleDb(tenant: string, name: string, devices?: DeviceInput[]): Promise<ModuleRow> {
+  if (!devices || devices.length === 0) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ids = await listModuleIdsDb(tenant);
+      const id = nextModuleId(ids);
+      try {
+        const r = await writePool.query(
+          `INSERT INTO modules (tenant, id, name) VALUES ($1, $2, $3)
+           RETURNING tenant, id, name, crop, retired_at, created_at`,
+          [tenant, id, name],
+        );
+        return r.rows[0] as ModuleRow;
+      } catch (err) {
+        // Race: otro cliente tomó el mismo mod-N entre el SELECT y el INSERT → recalcular una vez
+        if (attempt === 0 && (err as { code?: string }).code === "23505") continue;
+        throw err;
+      }
     }
+    throw new Error("insertModuleDb: unreachable");
   }
-  throw new Error("insertModuleDb: unreachable");
+  // Con kit declarativo (ADR-0028): módulo + devices en UNA transacción (o nada).
+  const client = await writePool.connect();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await client.query("BEGIN");
+      try {
+        const idsRes = await client.query(`SELECT id FROM modules WHERE tenant = $1`, [tenant]);
+        const id = nextModuleId((idsRes.rows as { id: string }[]).map((r) => r.id));
+        const r = await client.query(
+          `INSERT INTO modules (tenant, id, name) VALUES ($1, $2, $3)
+           RETURNING tenant, id, name, crop, retired_at, created_at`,
+          [tenant, id, name],
+        );
+        await insertDevicesDb(client, tenant, id, devices);
+        await client.query("COMMIT");
+        return r.rows[0] as ModuleRow;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        // Misma race que arriba: reintentar una vez con id recalculado
+        if (attempt === 0 && (err as { code?: string }).code === "23505") continue;
+        throw err;
+      }
+    }
+    throw new Error("insertModuleDb: unreachable");
+  } finally {
+    client.release();
+  }
+}
+
+/** Entrada queryable mínima: pool o cliente transaccional. */
+type Queryable = Pick<pg.Pool, "query">;
+
+/** Kit declarativo del nodo (ADR-0028): capability = clase de acción (actuador) o métrica alimentada (sensor); cámara NULL. */
+export type DeviceInput = {
+  id: string;
+  kind: "sensor" | "switch" | "camera";
+  capability?: string | null;
+};
+
+/** Inserta el kit de dispositivos de un módulo (idempotente por PK). Llamar dentro de la transacción del módulo. */
+export async function insertDevicesDb(q: Queryable, tenant: string, moduleId: string, devices: DeviceInput[]): Promise<void> {
+  for (const d of devices) {
+    await q.query(
+      `INSERT INTO devices (tenant, module, id, kind, capability) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tenant, module, id) DO NOTHING`,
+      [tenant, moduleId, d.id, d.kind, d.capability ?? null],
+    );
+  }
 }
 
 export async function updateModuleDb(
@@ -487,6 +539,19 @@ export async function claimDeviceDb(
     [hwId, tenant, moduleId, claimedBy],
   );
   return r.rows.length > 0;
+}
+/**
+ * Unclaiming (función de laboratorio/mantenimiento, ADR-0022/0028): libera el
+ * hw_id de su módulo — DELETE explícito en device_identities (el fierro vuelve
+ * a ser dispositivo tonto sin identidad). La historia (telemetría/auditoría)
+ * NO se toca. Retorna la fila previa (tenant/module) o null si no existía.
+ */
+export async function unclaimDeviceDb(hwId: string): Promise<{ tenant: string; module: string } | null> {
+  const r = await writePool.query(
+    `DELETE FROM device_identities WHERE hw_id = $1 RETURNING tenant, module`,
+    [hwId],
+  );
+  return (r.rows[0] as { tenant: string; module: string } | undefined) ?? null;
 }
 
 // ---------------------------------------------------------------------------

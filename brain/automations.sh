@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # automations.sh — crea/actualiza las automations de los agentes (ADR-0019).
+# Los EXPERTOS por especie los provisiona sync-experts.mjs desde crop_profiles
+# (ADR-0028): este script lo corre primero y luego gestiona el reporte diario.
 #
 # Idempotente por nombre: si la job existe, no la toca (para cambiarla,
 # bórrala con `openclaw cron rm <id>` y vuelve a correr este script).
@@ -35,6 +37,10 @@ fi
 
 # CLI dentro del contenedor (imagen oficial: entrypoint tini, CLI = node openclaw.mjs)
 OC="docker compose exec -T openclaw node openclaw.mjs"
+# Expertos dinámicos por especie (ADR-0028): workspaces + agents + crons desde
+# crop_profiles. Crear perfil "fresa" en la PWA y re-correr este script = experto-fresa.
+echo "Sincronizando expertos desde crop_profiles:"
+node "$ROOT/brain/sync-experts.mjs"
 
 # Timezone de la finca vía MCP (fuente de verdad). Fallback UTC con aviso.
 FARM_TZ="$(
@@ -71,14 +77,7 @@ create_job() {
 
 echo "Creando automations (agente / ritmo):"
 
-# --- Expertos (ADR-0019): ritmo propio, reportan al orquestador vía webhook ---
-create_job "revision-lechuga" "7 */6 * * *" "experto-lechuga" \
-  "Revisión programada de tus módulos. Lista los módulos con list_modules, quédate con los de crop 'lechuga' o variedades 'lechuga_*'. Para cada uno: latest_readings, module_confidence y recent_alerts (24 h), y compara contra los rangos de get_crop_profile del perfil exacto del módulo. Si todo está en rango y con confianza suficiente, responde exactamente NO_REPLY. Si hay anomalía, desvío sostenido, baja confianza o falta dato: redacta un reporte breve para el orquestador — módulo, variable, valor, rango del perfil, confianza y frescura del dato, acción sugerida. No actúas ni hablas con el humano." \
-  --webhook "$(webhook_url)"
-
-create_job "revision-tomate" "37 */6 * * *" "experto-tomate" \
-  "Revisión programada de tus módulos. Lista los módulos con list_modules, quédate con los de crop 'tomate' o variedades 'tomate_*'. Para cada uno: latest_readings, module_confidence y recent_alerts (24 h), y compara contra los rangos de get_crop_profile del perfil exacto del módulo. Si todo está en rango y con confianza suficiente, responde exactamente NO_REPLY. Si hay anomalía, desvío sostenido, baja confianza o falta dato: redacta un reporte breve para el orquestador — módulo, variable, valor, rango del perfil, confianza y frescura del dato, acción sugerida. No actúas ni hablas con el humano." \
-  --webhook "$(webhook_url)"
+# --- Expertos: ya provisionados por sync-experts.mjs (arriba) ---
 
 # --- Orquestador: reporte diario al humano (solo si hay canal destino) ---
 if [ -n "$CHANNEL" ]; then

@@ -9,6 +9,7 @@ import { parseReadingTopic, parseStatusTopic, parseCmdTopic, buildHealthTopic, b
 import { DeviceHealthTracker, type ExpectedDevice } from "./health.js";
 import { CrossVerifier } from "./verify.js";
 import { decideGap, parseGapMinMs } from "./dataGap.js";
+import { RangeTracker, type CropRanges, type RangeAlert } from "./cropRange.js";
 
 const { Pool } = pg;
 
@@ -23,11 +24,13 @@ const BOOT_GRACE_MS = process.env.BOOT_GRACE_MS ? parseInt(process.env.BOOT_GRAC
 const bootedAt = Date.now();
 const VERIFY_WINDOW_MS = process.env.VERIFY_WINDOW_MS ? parseInt(process.env.VERIFY_WINDOW_MS, 10) : 900000;
 const GAP_MIN_MS = parseGapMinMs(process.env.GAP_MIN_MS, 600000);
+// Nivel bajo (%): invariante física de cavitación — independiente del cultivo (ADR-0028)
+const LEVEL_LOW_PCT = process.env.LEVEL_LOW_PCT ? parseInt(process.env.LEVEL_LOW_PCT, 10) : 15;
 
 const READING_SUB = "terra/+/+/+/+/reading";
 const STATUS_SUB = "terra/+/+/+/status/status";
 const CMD_SUB = "terra/+/+/+/cmd";
-console.log(`[watchdog] arranque MQTT_URL=${MQTT_URL} SILENCE_AFTER_MS=${SILENCE_AFTER_MS} FROZEN_READINGS=${FROZEN_READINGS} VERIFY_WINDOW_MS=${VERIFY_WINDOW_MS} BOOT_GRACE_MS=${BOOT_GRACE_MS} GAP_MIN_MS=${GAP_MIN_MS}`);
+console.log(`[watchdog] arranque MQTT_URL=${MQTT_URL} SILENCE_AFTER_MS=${SILENCE_AFTER_MS} FROZEN_READINGS=${FROZEN_READINGS} VERIFY_WINDOW_MS=${VERIFY_WINDOW_MS} BOOT_GRACE_MS=${BOOT_GRACE_MS} GAP_MIN_MS=${GAP_MIN_MS} LEVEL_LOW_PCT=${LEVEL_LOW_PCT}`);
 
 // ---------------------------------------------------------------------------
 // DB pool
@@ -63,6 +66,47 @@ async function loadExpectedDevices(): Promise<void> {
     console.log(`[watchdog] expectedDevices cargados: ${res.rows.length} devices en ${next.size} módulos`);
   } catch (err) {
     console.warn("[watchdog] no se pudo cargar expectedDevices", err);
+  }
+}
+// ---------------------------------------------------------------------------
+// Rangos agronómicos (ADR-0028) — el watchdog es el ÚNICO evaluador de cultivo
+// ---------------------------------------------------------------------------
+
+const rangeTracker = new RangeTracker(LEVEL_LOW_PCT);
+// Transiciones detectadas en el handler de readings; se publican en evaluateAndPublish
+const pendingRangeAlerts: Array<{ tenant: string; module: string; alert: RangeAlert }> = [];
+
+async function loadCropProfiles(): Promise<void> {
+  try {
+    const res = await pool.query<{
+      tenant: string;
+      module: string;
+      crop: string;
+      ec_min: number;
+      ec_max: number;
+      ph_min: number;
+      ph_max: number;
+      water_temp_min: number;
+      water_temp_max: number;
+    }>(
+      `SELECT m.tenant, m.id AS module, m.crop, cp.ec_min, cp.ec_max, cp.ph_min, cp.ph_max, cp.water_temp_min, cp.water_temp_max
+       FROM modules m JOIN crop_profiles cp ON cp.name = m.crop WHERE m.crop IS NOT NULL`,
+    );
+    const next = new Map<string, { crop: string; ranges: CropRanges }>();
+    for (const row of res.rows) {
+      next.set(moduleKey(row.tenant, row.module), {
+        crop: row.crop,
+        ranges: {
+          ec: [Number(row.ec_min), Number(row.ec_max)],
+          ph: [Number(row.ph_min), Number(row.ph_max)],
+          temp: [Number(row.water_temp_min), Number(row.water_temp_max)],
+        },
+      });
+    }
+    rangeTracker.setProfiles(next);
+    console.log(`[watchdog] crop profiles cargados: ${next.size} módulos con cultivo`);
+  } catch (err) {
+    console.warn("[watchdog] no se pudo cargar crop profiles", err);
   }
 }
 
@@ -238,6 +282,22 @@ async function evaluateAndPublish(nowMs: number): Promise<void> {
       console.error(`[watchdog] error publicando alert ${topic}`, err);
     }
   }
+  // Alertas agronómicas pendientes (rangos de cultivo + nivel, ADR-0028) —
+  // mismo canal terra/{tenant}/{module}/alert, misma gracia de arranque
+  const inBootGraceRanges = nowMs - bootedAt < BOOT_GRACE_MS;
+  for (const p of pendingRangeAlerts.splice(0)) {
+    if (inBootGraceRanges) {
+      console.log(`[watchdog] alert suprimida (gracia arranque) ${p.tenant}/${p.module} ${p.alert.name}`);
+      continue;
+    }
+    const topic = buildAlertTopic(p.tenant, p.module);
+    try {
+      await publish(topic, JSON.stringify({ name: p.alert.name, ts: nowMs, severity: p.alert.severity, detail: p.alert.detail }), { qos: 1, retain: false });
+      console.log(`[watchdog] alert ${p.tenant}/${p.module} ${p.alert.name} ${p.alert.severity}`);
+    } catch (err) {
+      console.error(`[watchdog] error publicando alert ${topic}`, err);
+    }
+  }
 }
 client.on("message", (topic: string, payload: Buffer) => {
   // Intentar parsear JSON defensivo (para reading/status); cmd lo maneja tolerante vía verify
@@ -278,6 +338,14 @@ client.on("message", (topic: string, payload: Buffer) => {
         verifier.onReading(reading.tenant, reading.module, reading.metric, v, Date.now());
       } catch (err) {
         console.warn(`[watchdog] error verifier onReading ${topic}`, err);
+      }
+      // Rangos agronómicos (ADR-0028): cultivo (ec/ph/temp vs perfil) + nivel
+      try {
+        for (const alert of rangeTracker.seen(reading.tenant, reading.module, reading.metric, v)) {
+          pendingRangeAlerts.push({ tenant: reading.tenant, module: reading.module, alert });
+        }
+      } catch (err) {
+        console.warn(`[watchdog] error rangeTracker ${topic}`, err);
       }
     }
     return;
@@ -326,7 +394,11 @@ client.on("message", (topic: string, payload: Buffer) => {
 // ---------------------------------------------------------------------------
 
 await loadExpectedDevices();
-const refreshInterval = setInterval(() => void loadExpectedDevices(), 60_000);
+await loadCropProfiles();
+const refreshInterval = setInterval(() => {
+  void loadExpectedDevices();
+  void loadCropProfiles();
+}, 60_000);
 
 // data_gap — one-shot tras BOOT_GRACE (Fase 4)
 const dataGapTimeout = setTimeout(() => void checkDataGaps(), BOOT_GRACE_MS);

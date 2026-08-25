@@ -3,6 +3,9 @@
 *.local
 # generado por brain/setup.sh — contiene token real de hooks
 brain/openclaw.json
+# generado por brain/sync-experts.mjs desde crop_profiles (ADR-0028) — SOUL/skills re-renderizables, MEMORY.md es estado experiencial; cada workspace lleva su propio .git de OpenClaw
+brain/workspaces/experto-*/
+brain/openclaw.json.bak
 
 # --- Dependencias ---
 node_modules/

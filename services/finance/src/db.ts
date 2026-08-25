@@ -308,14 +308,14 @@ export async function insertDoseMovement(params: {
                             occurred_at, source, source_event, channel, op_number, created_by, note)
      SELECT $1, 'gasto', c.amt, c.currency, 'nutrientes', 'modulos',
             jsonb_build_array(jsonb_build_object(
-              'module', $3,
+              'module', $3::text,
               'amount', c.amt,
               'batch', (SELECT l.code FROM lotes l
-                        WHERE l.tenant = $1 AND l.modules ? $3 AND l.state = 'open'
+                        WHERE l.tenant = $1 AND l.modules ? $3::text AND l.state = 'open'
                         ORDER BY l.started_at DESC LIMIT 1)
             )),
             to_timestamp($4 / 1000.0), 'auto:doser', $5, 'auto', op.op_number, 'auto:portero', $7
-     FROM cost CROSS JOIN op
+     FROM cost c CROSS JOIN op
      ON CONFLICT (tenant, source_event) WHERE source_event IS NOT NULL DO NOTHING
      RETURNING id`,
     [tenant, ml, module, ts, sourceEvent, supply, note],
