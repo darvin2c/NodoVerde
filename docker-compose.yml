@@ -72,6 +72,7 @@ services:
         condition: service_healthy
 
   grafana:
+    profiles: [ui]
     image: grafana/grafana:12.0.0
     container_name: terra-grafana
     restart: unless-stopped
@@ -131,6 +132,7 @@ services:
     restart: "no"
 
   homeassistant:
+    profiles: [ui]
     image: ghcr.io/home-assistant/home-assistant:stable
     container_name: terra-ha
     restart: unless-stopped
@@ -148,6 +150,7 @@ services:
   # Observa física (:7751) + ctl (:7750) del host y el MQTT de laboratorio.
   # Dashboard: http://localhost:1880/dashboard · Editor: http://localhost:1880
   nodered:
+    profiles: [lab]
     build: ./sim/nodered
     container_name: terra-nodered
     restart: unless-stopped
@@ -169,6 +172,7 @@ services:
   # Imagen OFICIAL pre-construida (ADR-0018) — prohibido build desde fuente/fork.
   # Tags disponibles: versionados (2026.7.1-2), latest, extended-stable. Verificar: docker manifest inspect ghcr.io/openclaw/openclaw:<tag>
   openclaw:
+    profiles: [cerebro]
     image: ghcr.io/openclaw/openclaw:2026.7.1-2
     container_name: terra-openclaw
     restart: unless-stopped
@@ -197,11 +201,17 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    depends_on:
+      mcp-domain:
+        condition: service_healthy
+      finance:
+        condition: service_healthy
 
   # ── Fase 1 — servicios de dominio (ADR-0010) ──
 
   # Watchdog: salud de dispositivos (silencio/congelado/imposible/LWT) → health + alert
   watchdog:
+    profiles: [cerebro]
     build: ./services/watchdog
     container_name: terra-watchdog
     restart: unless-stopped
@@ -217,6 +227,7 @@ services:
 
   # Termómetro de confianza (cálculo determinístico, NUNCA el LLM) → confidence retenido por módulo
   confidence:
+    profiles: [cerebro]
     build: ./services/confidence
     container_name: terra-confidence
     restart: unless-stopped
@@ -232,6 +243,7 @@ services:
 
   # MCP read-only del dominio: las únicas herramientas del cerebro sobre datos de negocio
   mcp-domain:
+    profiles: [cerebro]
     build: ./services/mcp-domain
     container_name: terra-mcp-domain
     restart: unless-stopped
@@ -259,6 +271,7 @@ services:
   # Finance (Fase 2, ADR-0011): dueño único de movements. Auto-registro desde
   # dosificaciones (MQTT) + MCP read/write (registro por chat, anulaciones, costos).
   finance:
+    profiles: [cerebro]
     build: ./services/finance
     container_name: terra-finance
     restart: unless-stopped
@@ -281,6 +294,8 @@ services:
         condition: service_started
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:7761/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
@@ -290,6 +305,7 @@ services:
 
   # Portero (Fase 3, ADR-0012): gate de actuación — MCP terra-policy :7762 + HTTP /healthz + consumer MQTT
   policy:
+    profiles: [cerebro]
     build: ./services/policy
     container_name: terra-policy
     restart: unless-stopped
@@ -308,6 +324,8 @@ services:
         condition: service_healthy
       timescale:
         condition: service_healthy
+      bridge:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:7762/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
@@ -317,6 +335,7 @@ services:
 
   # Bridge MQTT→OpenClaw hooks (bus → cerebro). Observador: jamás publica cmd/request.
   bridge:
+    profiles: [cerebro]
     build: ./services/bridge
     container_name: terra-bridge
     restart: unless-stopped
@@ -333,6 +352,14 @@ services:
         condition: service_healthy
       timescale:
         condition: service_healthy
+      openclaw:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:7765/').then(()=>process.exit(0)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Token-meter (Fase 4, ADR-0021 §4): contabilidad determinística de tokens del cerebro.
   # Lee sesiones JSONL de OpenClaw (ro), calcula USD con tabla de precios propia (código,
@@ -340,6 +367,7 @@ services:
   # y alerta budget_tokens si el mes supera el techo. Sin TOKEN_PRICE_TABLE no registra
   # (alerta unknown_model — jamás fabrica costos).
   token-meter:
+    profiles: [cerebro]
     build: ./services/token-meter
     container_name: terra-token-meter
     restart: unless-stopped
@@ -365,6 +393,7 @@ services:
 
   # PWA terraOS — portada read-only (ADR-0014). tRPC server sirve API + frontend compilado.
   pwa:
+    profiles: [ui]
     build: ./pwa
     container_name: terra-pwa
     restart: unless-stopped
@@ -384,3 +413,12 @@ services:
         condition: service_healthy
       timescale:
         condition: service_healthy
+      mcp-domain:
+        condition: service_healthy
+        required: false
+      finance:
+        condition: service_healthy
+        required: false
+      policy:
+        condition: service_healthy
+        required: false
