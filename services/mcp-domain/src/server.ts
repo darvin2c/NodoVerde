@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   listModulesDb,
   getCropProfileDb,
+  getCropProfilesDb,
   getFarmContextDb,
   latestReadingsDb,
   telemetryRangeDb,
@@ -41,6 +42,7 @@ import {
   updateModuleDb,
   retireModuleDb,
   claimDeviceDb,
+  unclaimDeviceDb,
   isValidTenantId,
   isValidCurrency,
   isValidLatLon,
@@ -156,6 +158,23 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text: `Perfil ${name}\n${summaryText(row)}` }],
         structuredContent: { found: true, profile: row } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // — list_crop_profiles (ADR-0028: de aquí nacen los expertos por especie) ----
+  server.registerTool(
+    "list_crop_profiles",
+    {
+      title: "Listar perfiles de cultivo",
+      description: "Lista todos los perfiles de cultivo (rangos ec/ph/temp, ciclo, notas) ordenados por nombre. Read-only.",
+      inputSchema: {},
+    },
+    async () => {
+      const rows = await getCropProfilesDb();
+      return {
+        content: [{ type: "text", text: `Perfiles de cultivo: ${rows.length}\n${summaryText(rows)}` }],
+        structuredContent: { profiles: rows } as unknown as Record<string, unknown>,
       };
     },
   );
@@ -576,17 +595,32 @@ export function createMcpServer(): McpServer {
     {
       title: "Crear módulo",
       description:
-        "Crea un módulo (mesa, infraestructura fungible — ADR-0025) con id técnico autogenerado mod-N y nombre humano libre. Nace LIBRE (sin cultivo): el cultivo lo pone el lote al abrirse (open_batch). Nace sin fierro: vincular luego con claim_device.",
+        "Crea un módulo (mesa, infraestructura fungible — ADR-0025) con id técnico autogenerado mod-N y nombre humano libre. Nace LIBRE (sin cultivo): el cultivo lo pone el lote al abrirse (open_batch). Nace sin fierro: vincular luego con claim_device. Opcionalmente acepta el kit declarativo de dispositivos (devices), insertado en la MISMA transacción que el módulo (ADR-0028): capability = clase de acción del actuador o métrica del sensor; cámara null.",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         name: z.string().min(1).describe("Nombre humano del módulo (ej: 'Mesa Norte')"),
+        devices: z
+          .array(
+            z.object({
+              id: z.string().describe("Id del dispositivo (ej: 'ec-01', 'doser-a-01')"),
+              kind: z.enum(["sensor", "switch", "camera"]),
+              capability: z
+                .string()
+                .nullable()
+                .optional()
+                .describe("Actuador: clase de acción (dose_nutrient/dose_ph/fill_water/recirculate); sensor: métrica (ec/ph/temp/level/flow/climate); cámara: null"),
+            }),
+          )
+          .optional()
+          .describe("Kit declarativo del nodo — se inserta en la misma transacción que el módulo (ADR-0028)"),
       },
     },
-    async ({ tenant, name }) => {
-      const row = await insertModuleDb(tenant, name);
+    async ({ tenant, name, devices }) => {
+      const row = await insertModuleDb(tenant, name, devices);
       await publishModuleMeta(tenant, row.id, "module_created");
+      const kitNote = devices?.length ? ` + kit de ${devices.length} dispositivos` : "";
       return {
-        content: [{ type: "text", text: `Módulo creado ${row.id} "${name}" tenant=${tenant} — libre, sin cultivo hasta que un lote lo ocupe\n${summaryText(row)}` }],
+        content: [{ type: "text", text: `Módulo creado ${row.id} "${name}" tenant=${tenant}${kitNote} — libre, sin cultivo hasta que un lote lo ocupe\n${summaryText(row)}` }],
         structuredContent: { module: row } as unknown as Record<string, unknown>,
       };
     },
@@ -830,6 +864,38 @@ export function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text }],
         structuredContent: { hw_id, tenant, module: moduleId } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+  // — unclaim_device ---------------------------------------------------------
+  server.registerTool(
+    "unclaim_device",
+    {
+      title: "Desvincular fierro",
+      description:
+        "Función de laboratorio/mantenimiento (ADR-0022/0028): libera un hw_id de su módulo — el fierro vuelve a ser un dispositivo tonto sin identidad y deja de traducirse al plano interno. No borra historia: telemetría y auditoría quedan intactas.",
+      inputSchema: {
+        hw_id: z.string().describe("Id de fábrica del ESP32: 12 hex minúsculas"),
+      },
+    },
+    async ({ hw_id }) => {
+      if (!isValidHwId(hw_id)) {
+        return {
+          content: [{ type: "text", text: `hw_id inválido: "${hw_id}" — se esperan 12 hex minúsculas (ej: 020000000005)` }],
+          structuredContent: { error: "invalid_hw_id", hw_id } as unknown as Record<string, unknown>,
+        };
+      }
+      const prev = await unclaimDeviceDb(hw_id);
+      if (!prev) {
+        return {
+          content: [{ type: "text", text: `hw_id ${hw_id} no estaba claimeado — nada que liberar` }],
+          structuredContent: { unclaimed: false, hw_id } as unknown as Record<string, unknown>,
+        };
+      }
+      await publishModuleMeta(prev.tenant, prev.module, "device_unclaimed");
+      return {
+        content: [{ type: "text", text: `Fierro ${hw_id} liberado de ${prev.tenant}/${prev.module}` }],
+        structuredContent: { unclaimed: true, hw_id, tenant: prev.tenant, module: prev.module } as unknown as Record<string, unknown>,
       };
     },
   );

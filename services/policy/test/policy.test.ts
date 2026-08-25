@@ -33,7 +33,6 @@ vi.mock("mqtt", async () => {
 
 // Import after mocks
 import {
-  classifyDevice,
   parseRequestPayload,
   checkTimeWindow,
   checkConfidence,
@@ -41,7 +40,8 @@ import {
   checkHardCeiling,
   validateParams,
 } from "../src/rules.js";
-import { ACTION_CLASSES, DEVICE_TO_CLASS, __resetWindowsCache } from "../src/config.js";
+import { ACTION_CLASSES, __resetWindowsCache, type ActionClass } from "../src/config.js";
+import { classOfDevice, __resetCapabilitiesCache, type ModuleCapabilities } from "../src/capabilities.js";
 import { proposeAction, approveAction, rejectAction, setPublisher } from "../src/policy.js";
 import { clearState, moduleConfidence, moduleHealth, lastReadings, onReading, onConfidence, onHealth, readingsForModule } from "../src/state.js";
 import { getModuleWithCrop, lastExecutedAt, hasPendingFor } from "../src/db.js";
@@ -62,14 +62,23 @@ function dateAtHour(hour: number, tz = "America/Lima"): Date {
 // ---------------------------------------------------------------------------
 // clasificación
 // ---------------------------------------------------------------------------
-describe("classifyDevice", () => {
-  it("valve-fill-01 → fill_water", () => expect(classifyDevice("valve-fill-01")).toBe("fill_water"));
-  it("doser-a-01 → dose_nutrient", () => expect(classifyDevice("doser-a-01")).toBe("dose_nutrient"));
-  it("doser-b-01 → dose_nutrient", () => expect(classifyDevice("doser-b-01")).toBe("dose_nutrient"));
-  it("doser-ph-01 → dose_ph", () => expect(classifyDevice("doser-ph-01")).toBe("dose_ph"));
-  it("pump-recirc-01 → recirculate", () => expect(classifyDevice("pump-recirc-01")).toBe("recirculate"));
-  it("sensor → null", () => expect(classifyDevice("ec-01")).toBeNull());
-  it("desconocido → null", () => expect(classifyDevice("otro")).toBeNull());
+describe("classOfDevice — clasificación desde capabilities provisionadas (ADR-0028)", () => {
+  const caps: ModuleCapabilities = {
+    classToDevices: new Map<ActionClass, string[]>([
+      ["fill_water", ["valve-fill-01"]],
+      ["dose_nutrient", ["doser-a-01", "doser-b-01"]],
+      ["dose_ph", ["doser-ph-01"]],
+      ["recirculate", ["pump-recirc-01"]],
+    ]),
+    metricToDevice: new Map([["ec", "ec-01"], ["ph", "ph-01"], ["level", "level-01"]]),
+  };
+  it("valve-fill-01 → fill_water", () => expect(classOfDevice(caps, "valve-fill-01")).toBe("fill_water"));
+  it("doser-a-01 → dose_nutrient", () => expect(classOfDevice(caps, "doser-a-01")).toBe("dose_nutrient"));
+  it("doser-b-01 → dose_nutrient", () => expect(classOfDevice(caps, "doser-b-01")).toBe("dose_nutrient"));
+  it("doser-ph-01 → dose_ph", () => expect(classOfDevice(caps, "doser-ph-01")).toBe("dose_ph"));
+  it("pump-recirc-01 → recirculate", () => expect(classOfDevice(caps, "pump-recirc-01")).toBe("recirculate"));
+  it("sensor → null", () => expect(classOfDevice(caps, "ec-01")).toBeNull());
+  it("desconocido → null", () => expect(classOfDevice(caps, "otro")).toBeNull());
 });
 
 // ---------------------------------------------------------------------------
@@ -77,47 +86,47 @@ describe("classifyDevice", () => {
 // ---------------------------------------------------------------------------
 describe("parseRequestPayload", () => {
   it("ON crudo a doser → start con default 2000", () => {
-    const r = parseRequestPayload("ON", "doser-a-01");
+    const r = parseRequestPayload("ON", "dose_nutrient");
     expect(r).toEqual({ action: "start", params: { duration_ms: 2000 } });
   });
   it("ON crudo a valve → start con 30000 (fill sin default)", () => {
-    const r = parseRequestPayload("ON", "valve-fill-01");
+    const r = parseRequestPayload("ON", "fill_water");
     expect(r?.action).toBe("start");
     expect((r as { params?: { duration_ms?: number } })?.params?.duration_ms).toBeGreaterThanOrEqual(500);
   });
   it("ON crudo a pump → set ON sostenido", () => {
-    const r = parseRequestPayload("ON", "pump-recirc-01");
+    const r = parseRequestPayload("ON", "recirculate");
     expect(r).toEqual({ action: "set", params: { v: "ON" } });
   });
   it("OFF crudo → stop", () => {
-    expect(parseRequestPayload("OFF", "doser-a-01")).toEqual({ action: "stop" });
-    expect(parseRequestPayload("OFF", "pump-recirc-01")).toEqual({ action: "stop" });
+    expect(parseRequestPayload("OFF", "dose_nutrient")).toEqual({ action: "stop" });
+    expect(parseRequestPayload("OFF", "recirculate")).toEqual({ action: "stop" });
   });
   it("Buffer ON → start", () => {
-    expect(parseRequestPayload(Buffer.from("ON"), "doser-b-01")?.action).toBe("start");
+    expect(parseRequestPayload(Buffer.from("ON"), "dose_nutrient")?.action).toBe("start");
   });
   it('JSON {v:"ON"} a doser → start', () => {
-    const r = parseRequestPayload(JSON.stringify({ v: "ON" }), "doser-a-01");
+    const r = parseRequestPayload(JSON.stringify({ v: "ON" }), "dose_nutrient");
     expect(r?.action).toBe("start");
   });
   it('JSON {v:"OFF"} → stop', () => {
-    expect(parseRequestPayload(JSON.stringify({ v: "OFF" }), "doser-a-01")).toEqual({ action: "stop" });
+    expect(parseRequestPayload(JSON.stringify({ v: "OFF" }), "dose_nutrient")).toEqual({ action: "stop" });
   });
   it('JSON {action:"start", params:{duration_ms:5000}} → start 5000', () => {
-    const r = parseRequestPayload(JSON.stringify({ action: "start", params: { duration_ms: 5000 } }), "doser-a-01");
+    const r = parseRequestPayload(JSON.stringify({ action: "start", params: { duration_ms: 5000 } }), "dose_nutrient");
     expect(r).toEqual({ action: "start", params: { duration_ms: 5000 } });
   });
   it('JSON {action:"set", v:"ON"} a pump → set', () => {
-    const r = parseRequestPayload(JSON.stringify({ action: "set", v: "ON" }), "pump-recirc-01");
+    const r = parseRequestPayload(JSON.stringify({ action: "set", v: "ON" }), "recirculate");
     expect(r).toEqual({ action: "set", params: { v: "ON" } });
   });
   it("objeto directo {action:'stop'} → stop", () => {
-    expect(parseRequestPayload({ action: "stop" }, "doser-a-01")).toEqual({ action: "stop" });
+    expect(parseRequestPayload({ action: "stop" }, "dose_nutrient")).toEqual({ action: "stop" });
   });
   it("payload inválido → null", () => {
-    expect(parseRequestPayload("XYZ", "doser-a-01")).toBeNull();
-    expect(parseRequestPayload("", "doser-a-01")).toBeNull();
-    expect(parseRequestPayload(null, "doser-a-01")).toBeNull();
+    expect(parseRequestPayload("XYZ", "dose_nutrient")).toBeNull();
+    expect(parseRequestPayload("", "dose_nutrient")).toBeNull();
+    expect(parseRequestPayload(null, "dose_nutrient")).toBeNull();
   });
 });
 
@@ -306,6 +315,7 @@ describe("pipeline proposeAction — flujo completo", () => {
     __resetWindowsCache();
     delete process.env.POLICY_WINDOWS_JSON;
     __resetWindowsCache();
+    __resetCapabilitiesCache(); // capabilities cachea 30s por módulo — sin reset los mocks se desalinean
   });
   afterEach(() => setPublisher(null));
 
@@ -322,8 +332,27 @@ describe("pipeline proposeAction — flujo completo", () => {
       rows: [{ tenant: "demo", module: "mod-9", crop: null, ec_min: null, ec_max: null, ph_min: null, ph_max: null, water_temp_min: null, water_temp_max: null, tz: "America/Lima" }],
     } as never);
   }
+  // Kit estándar provisionado (ADR-0028): capabilities query = PRIMER query de proposeAction
+  const KIT_ROWS = [
+    { id: "climate-01", capability: "climate" },
+    { id: "doser-a-01", capability: "dose_nutrient" },
+    { id: "doser-b-01", capability: "dose_nutrient" },
+    { id: "doser-ph-01", capability: "dose_ph" },
+    { id: "ec-01", capability: "ec" },
+    { id: "flow-01", capability: "flow" },
+    { id: "level-01", capability: "level" },
+    { id: "ph-01", capability: "ph" },
+    { id: "pump-recirc-01", capability: "recirculate" },
+    { id: "temp-01", capability: "temp" },
+    { id: "valve-fill-01", capability: "fill_water" },
+  ];
+
+  function mockKit(rows = KIT_ROWS) {
+    mockQuery.mockResolvedValueOnce({ rows } as never);
+  }
 
   it("ADR-0025: dosificar en mesa libre (sin lote) = rechazado no_active_batch", async () => {
+    mockKit();
     mockModuleLibre();
     mockQuery.mockResolvedValueOnce({ rows: [{ id: "id-x", policy_id: "pol-x", status: "rejected" }] } as never); // audit insert
     const res = await proposeAction({
@@ -335,7 +364,7 @@ describe("pipeline proposeAction — flujo completo", () => {
       requested_by: "agent-test",
     });
     expect(res.status).toBe("rejected");
-    expect(res.reason).toContain("no_active_batch");
+    if (res.status === "rejected") expect(res.reason).toContain("no_active_batch");
     expect(published.length).toBe(0); // jamás cmd a una dosificadora sin cultivo
   });
 
@@ -343,6 +372,7 @@ describe("pipeline proposeAction — flujo completo", () => {
     moduleConfidence.set("demo/mod-9", { v: 85, ts: Date.now(), sources: { ec: 90, ph: 90, level: 90 } });
     moduleHealth.set("demo/mod-9", "healthy");
     lastReadings.set("demo/mod-9/level", { v: 50, ts: Date.now() });
+    mockKit();
     mockModuleLibre();
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // lastExecuted
@@ -363,6 +393,7 @@ describe("pipeline proposeAction — flujo completo", () => {
   });
 
   it("autonomous (fill_water) ejecuta inmediato y publica cmd", async () => {
+    mockKit();
     mockModuleOk();
     // hasPendingFor false
     mockQuery.mockResolvedValueOnce({ rows: [] } as never);
@@ -393,6 +424,7 @@ describe("pipeline proposeAction — flujo completo", () => {
   });
 
   it("supervised (dose_nutrient) queda pending y NO publica cmd", async () => {
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // lastExecuted
@@ -411,6 +443,7 @@ describe("pipeline proposeAction — flujo completo", () => {
 
   it("needs_data cuando confianza baja: publica request/read y no cmd", async () => {
     moduleConfidence.set("demo/mod-1", { v: 40, ts: Date.now(), sources: { ec: 10 } }); // ec 10 <70
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // lastExecuted
@@ -430,6 +463,7 @@ describe("pipeline proposeAction — flujo completo", () => {
   });
 
   it("rate limit rechaza si última executed reciente", async () => {
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending false
     // lastExecutedAt hace 10s, rateLimit 600s para dose_nutrient
@@ -450,6 +484,7 @@ describe("pipeline proposeAction — flujo completo", () => {
   it("rate limit NO aplica a stop (modo manual: quien abre puede cerrar)", async () => {
     // recirculate es autonomous: si stop pasara por rate limit quedaría rejected;
     // aquí debe ejecutar aunque haya un executed reciente de la misma clase
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending false
     // NO se consulta lastExecutedAt para stop — si se consultara y devolviera reciente, rompería
@@ -469,6 +504,7 @@ describe("pipeline proposeAction — flujo completo", () => {
   });
 
   it("serialización rechaza si hay pending mismo device", async () => {
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [{ "1": 1 }] } as never); // hasPending true
     mockQuery.mockResolvedValueOnce({ rows: [{ id: "id-5", policy_id: "pol-5", status: "rejected" }] } as never);
@@ -486,6 +522,7 @@ describe("pipeline proposeAction — flujo completo", () => {
 
   it("techo duro EC rechaza dose_nutrient", async () => {
     lastReadings.set("demo/mod-1/ec", { v: 2.5, ts: Date.now() }); // ec_max 1.8 +0.5 =2.3 → 2.5 rechaza
+    mockKit();
     mockModuleOk();
     // health/pending/rate no llegan a consultarse porque techo antes de pending/rate? En pipeline techo antes de pendiente, sí.
     mockQuery.mockResolvedValueOnce({ rows: [{ id: "id-6", policy_id: "pol-6", status: "rejected" }] } as never);
@@ -503,6 +540,7 @@ describe("pipeline proposeAction — flujo completo", () => {
 
   it("techo duro level >=95 rechaza fill_water", async () => {
     lastReadings.set("demo/mod-1/level", { v: 96, ts: Date.now() });
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [{ id: "lvl-rej", policy_id: "pol-lvl", status: "rejected" }] } as never);
     const res = await proposeAction({
@@ -518,6 +556,7 @@ describe("pipeline proposeAction — flujo completo", () => {
 
   it("health blind rechaza con module_offline", async () => {
     moduleHealth.set("demo/mod-1", "blind");
+    mockKit();
     mockModuleOk();
     mockQuery.mockResolvedValueOnce({ rows: [{ id: "id-7", policy_id: "pol-7", status: "rejected" }] } as never);
     const res = await proposeAction({
@@ -561,12 +600,87 @@ describe("pipeline proposeAction — flujo completo", () => {
       rows: [{ tenant: "demo", module: "mod-1", crop: "lechuga", ec_min: 1.2, ec_max: 1.8, ph_min: 5.8, ph_max: 6.3, water_temp_min: 18, water_temp_max: 24, tz: "America/Lima" }],
     } as never);
     mockQuery.mockResolvedValueOnce({ rows: [] } as never); // lastExecuted
+    mockKit(); // capabilities (request/read al sensor de la clase, ADR-0028)
     const res = await approveAction("pending-2", "human-1");
     expect(res.status).toBe("needs_data");
     if (res.status === "needs_data") expect(res.needs).toContain("ec");
     // fila queda pending → no markExecuted, no cmd
     expect(published.some((p) => p.topic.includes("/cmd"))).toBe(false);
     expect(published.some((p) => p.topic.includes("/ec-01/request/read"))).toBe(true);
+  });
+
+  it("action_class sin device → el portero elige el actuador capaz (ADR-0028)", async () => {
+    mockKit();
+    mockModuleOk();
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never); // hasPending
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never); // lastExecuted
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: "id-cls", policy_id: "pol-cls", status: "pending" }] } as never);
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-1",
+      action_class: "dose_nutrient",
+      action: "start",
+      requested_by: "agent-test",
+      reason: "EC bajo el piso del perfil",
+    });
+    expect(res.status).toBe("pending");
+    // doser-a-01: primer actuador capaz (ids ordenados, determinista)
+    const insertSql = mockQuery.mock.calls.map((c) => String(c[0])).find((s) => s.includes("INSERT INTO action_requests"));
+    expect(insertSql).toBeTruthy();
+    const insertCall = mockQuery.mock.calls.find((c) => String(c[0]).includes("INSERT INTO action_requests"));
+    expect(insertCall?.[1]).toContain("doser-a-01");
+    expect(published.length).toBe(0); // supervised: sin cmd hasta aprobación
+  });
+
+  it("módulo sin dispositivo capaz → no_capable_device", async () => {
+    mockKit(KIT_ROWS.filter((r) => r.capability !== "dose_nutrient" && r.capability !== "dose_ph")); // mesa sin dosers
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-1",
+      action_class: "dose_nutrient",
+      action: "start",
+      requested_by: "agent-test",
+    });
+    expect(res.status).toBe("rejected");
+    if (res.status === "rejected") expect(res.reason).toContain("no_capable_device: dose_nutrient en demo/mod-1");
+  });
+
+  it("device sin capability conocida → unknown_device_capability", async () => {
+    mockKit();
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-1",
+      device: "doser-x-99",
+      action: "start",
+      requested_by: "agent-test",
+    });
+    expect(res.status).toBe("rejected");
+    if (res.status === "rejected") expect(res.reason).toContain("unknown_device_capability: doser-x-99");
+  });
+
+  it("device + action_class incoherentes → class_mismatch", async () => {
+    mockKit();
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-1",
+      device: "doser-a-01",
+      action_class: "dose_ph",
+      action: "start",
+      requested_by: "agent-test",
+    });
+    expect(res.status).toBe("rejected");
+    if (res.status === "rejected") expect(res.reason).toContain("class_mismatch");
+  });
+
+  it("ni device ni action_class → rejected", async () => {
+    const res = await proposeAction({
+      tenant: "demo",
+      module: "mod-1",
+      action: "start",
+      requested_by: "agent-test",
+    });
+    expect(res.status).toBe("rejected");
+    if (res.status === "rejected") expect(res.reason).toContain("device o action_class requerido");
   });
 
   it("reject_action pending→rejected", async () => {

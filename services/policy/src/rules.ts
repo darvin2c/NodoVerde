@@ -1,12 +1,11 @@
 // src/rules.ts — funciones PURAS unit-testeables del portero
-import { ACTION_CLASSES, DEVICE_TO_CLASS, getWindowForClass, type ActionClass } from "./config.js";
+import { ACTION_CLASSES, getWindowForClass, type ActionClass } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Clasificación
 // ---------------------------------------------------------------------------
-export function classifyDevice(device: string): ActionClass | null {
-  return DEVICE_TO_CLASS[device] ?? null;
-}
+// La clasificación dispositivo → clase ya NO es una constante compilada (ADR-0028):
+// se resuelve desde devices.capability provisionada (capabilities.ts → classOfDevice).
 
 // ---------------------------------------------------------------------------
 // parseRequestPayload — crudo ON/OFF, JSON, {v}, {action}
@@ -16,13 +15,13 @@ export type ParsedPayload =
   | { action: "stop" }
   | { action: "set"; params: { v: "ON" | "OFF" } };
 
-function defaultDurationForDevice(device: string): number | undefined {
-  const cls = classifyDevice(device);
-  if (!cls) return undefined;
+// Duración por defecto según la CLASE del actuador (la clase la resuelve el caller
+// desde capabilities provisionadas — rules.ts sigue puro).
+function defaultDurationForClass(cls: ActionClass): number | undefined {
   return ACTION_CLASSES[cls].defaultDurationMs;
 }
 
-export function parseRequestPayload(raw: unknown, device: string): ParsedPayload | null {
+export function parseRequestPayload(raw: unknown, cls: ActionClass): ParsedPayload | null {
   // Normalizar raw a texto u objeto
   let text: string | null = null;
   let obj: unknown = raw;
@@ -45,11 +44,11 @@ export function parseRequestPayload(raw: unknown, device: string): ParsedPayload
   if (text !== null) {
     const up = text.toUpperCase();
     if (up === "ON") {
-      // Doser/valve → start con default, pump → set ON sostenido
-      if (device === "pump-recirc-01") {
+      // recirculate (bomba) → set ON sostenido; dosis/llenado → start con default
+      if (cls === "recirculate") {
         return { action: "set", params: { v: "ON" } };
       }
-      const d = defaultDurationForDevice(device);
+      const d = defaultDurationForClass(cls);
       if (d !== undefined) return { action: "start", params: { duration_ms: d } };
       // fill_water sin default definido → usar 30000 como pulso por defecto (válido dentro de 500..120000)
       // Si no hay default y no es pump, retornar start sin duration (validateParams lo rellenará o rechazará)
@@ -91,8 +90,8 @@ export function parseRequestPayload(raw: unknown, device: string): ParsedPayload
     if (typeof obj === "string") {
       const u = (obj as string).trim().toUpperCase();
       if (u === "ON") {
-        if (device === "pump-recirc-01") return { action: "set", params: { v: "ON" } };
-        const d = defaultDurationForDevice(device);
+        if (cls === "recirculate") return { action: "set", params: { v: "ON" } };
+        const d = defaultDurationForClass(cls);
         return { action: "start", params: { duration_ms: d ?? 30000 } };
       }
       if (u === "OFF") return { action: "stop" };
@@ -109,15 +108,15 @@ export function parseRequestPayload(raw: unknown, device: string): ParsedPayload
   if (typeof vRaw === "string") {
     const vUp = vRaw.trim().toUpperCase();
     if (vUp === "ON") {
-      // si v es ON, distinguir pump vs resto igual que crudo ON
-      if (device === "pump-recirc-01") {
+      // si v es ON, distinguir recirculate vs resto igual que crudo ON
+      if (cls === "recirculate") {
         return { action: "set", params: { v: "ON" } };
       }
-      // Si viene {v:"ON"} sin action explícito, para doser/valve interpretamos como start
+      // Si viene {v:"ON"} sin action explícito, para dosis/llenado interpretamos como start
       // (patrón humano HA button publica {v:ON} pero el portero debe convertir a start)
-      // Sin embargo spec dice set+{v} es sostenido solo para pump; para doser/valve debe ser start.
-      // Mantenemos comportamiento: {v:ON} con doser/valve → start
-      const d = defaultDurationForDevice(device);
+      // Sin embargo spec dice set+{v} es sostenido solo para recirculate; para dosis/llenado debe ser start.
+      // Mantenemos comportamiento: {v:ON} con dosis/llenado → start
+      const d = defaultDurationForClass(cls);
       // Si el objeto también trae action set explícito, respetarlo
       if (typeof rec.action === "string" && rec.action.toLowerCase() === "set") {
         return { action: "set", params: { v: "ON" } };
@@ -152,7 +151,7 @@ export function parseRequestPayload(raw: unknown, device: string): ParsedPayload
         if (Number.isFinite(n)) return { action: "start", params: { duration_ms: Math.round(n) } };
       }
       // sin duration → default si existe
-      const d = defaultDurationForDevice(device);
+      const d = defaultDurationForClass(cls);
       if (d !== undefined) return { action: "start", params: { duration_ms: d } };
       return { action: "start", params: { duration_ms: 30000 } };
     }

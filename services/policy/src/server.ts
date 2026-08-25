@@ -23,11 +23,12 @@ export function createMcpServer(): McpServer {
     {
       title: "Proponer acción",
       description:
-        "Propone una acción de actuador al portero. Valida salud/confianza/techo/rate/ventana y encola o ejecuta según autonomía.",
+        "Propone una acción de actuador al portero. Valida salud/confianza/techo/rate/ventana y encola o ejecuta según autonomía. device es opcional si se pasa action_class (ADR-0028) — el portero elige el dispositivo capaz del módulo desde devices.capability.",
       inputSchema: {
         tenant: z.string().describe("Tenant"),
         module: z.string().describe("Módulo"),
-        device: z.string().describe("Dispositivo actuador (pump-recirc-01, valve-fill-01, doser-*-01)"),
+        device: z.string().optional().describe("Dispositivo actuador — opcional si viene action_class"),
+        action_class: z.enum(["fill_water", "dose_nutrient", "dose_ph", "recirculate"]).optional().describe("Clase de acción — el portero resuelve el dispositivo capaz del módulo"),
         action: z.enum(["start", "stop", "set"]).describe("Acción"),
         params: z.record(z.unknown()).optional().describe("Parámetros: {duration_ms} para start o {v: ON|OFF} para set"),
         requested_by: z.string().describe("Quién propone (agentId)"),
@@ -38,7 +39,8 @@ export function createMcpServer(): McpServer {
       const res = await proposeAction({
         tenant: args.tenant as string,
         module: args.module as string,
-        device: args.device as string,
+        device: args.device as string | undefined,
+        action_class: args.action_class as "fill_water" | "dose_nutrient" | "dose_ph" | "recirculate" | undefined,
         action: args.action as string,
         params: (args.params as Record<string, unknown> | undefined) ?? null,
         requested_by: args.requested_by as string,

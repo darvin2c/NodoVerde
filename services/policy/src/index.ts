@@ -5,7 +5,8 @@ import { POLICY_PORT, MQTT_URL } from "./config.js";
 import { pool } from "./db.js";
 import { onReading, onConfidence, onHealth } from "./state.js";
 import { setPublisher } from "./policy.js";
-import { parseRequestPayload, classifyDevice } from "./rules.js";
+import { parseRequestPayload } from "./rules.js";
+import { getModuleCapabilities, classOfDevice } from "./capabilities.js";
 import { proposeAction } from "./policy.js";
 
 // ---------------------------------------------------------------------------
@@ -65,34 +66,39 @@ mqttClient.on("message", (topic: string, payload: Buffer) => {
     const mod = parts[2];
     const device = parts[3];
     // Solo actuadores
-    if (!classifyDevice(device)) return;
-    // Extraer payload y parsear
-    const parsed = parseRequestPayload(payload, device);
-    if (!parsed) {
-      console.warn(`[terra-policy] request humano no parseable ${topic} → ignorado`);
-      return;
-    }
-    // Solo interceptar set|start|stop hacia actuadores; read|capture|calibrate pasan directo (no hacer nada)
-    // parsed siempre es start|stop|set así que está interceptado
-    const params =
-      parsed.action === "start"
-        ? (parsed as { action: "start"; params?: { duration_ms?: number } }).params ?? null
-        : parsed.action === "set"
-          ? (parsed as { action: "set"; params: { v: string } }).params
-          : null;
+    // Solo actuadores — la clase se resuelve desde capabilities provisionadas
+    // (ADR-0028: devices.capability en DB, no constante compilada)
+    void (async () => {
+      const caps = await getModuleCapabilities(tenant, mod);
+      const cls = classOfDevice(caps, device);
+      if (!cls) return; // sensor/cámara/desconocido: no es actuación, pasa directo
+      // Extraer payload y parsear
+      const parsed = parseRequestPayload(payload, cls);
+      if (!parsed) {
+        console.warn(`[terra-policy] request humano no parseable ${topic} → ignorado`);
+        return;
+      }
+      // Solo interceptar set|start|stop hacia actuadores; read|capture|calibrate pasan directo (no hacer nada)
+      // parsed siempre es start|stop|set así que está interceptado
+      const params =
+        parsed.action === "start"
+          ? (parsed as { action: "start"; params?: { duration_ms?: number } }).params ?? null
+          : parsed.action === "set"
+            ? (parsed as { action: "set"; params: { v: string } }).params
+            : null;
 
-    void proposeAction({
-      tenant,
-      module: mod,
-      device,
-      action: parsed.action,
-      params: params as Record<string, unknown> | null,
-      requested_by: "ha-button",
-      reason: "request humana HA",
-      source: "human",
-    })
-      .then((r) => console.log(`[terra-policy] humana ${tenant}/${mod}/${device} ${parsed.action} → ${r.status}`))
-      .catch((err) => console.error("[terra-policy] humana propose error", err));
+      const r = await proposeAction({
+        tenant,
+        module: mod,
+        device,
+        action: parsed.action,
+        params: params as Record<string, unknown> | null,
+        requested_by: "ha-button",
+        reason: "request humana HA",
+        source: "human",
+      });
+      console.log(`[terra-policy] humana ${tenant}/${mod}/${device} ${parsed.action} → ${r.status}`);
+    })().catch((err) => console.error("[terra-policy] humana propose error", err));
     return;
   }
 });

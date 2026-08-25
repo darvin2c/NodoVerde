@@ -1,0 +1,12 @@
+# ADR-0028: Grafana ya NO evalúa umbrales agronómicos — la evaluación vive en el
+# dominio (watchdog vs crop_profiles). Estas reglas se borran del provisioning;
+# este archivo las elimina además en volúmenes grafana_data existentes (el
+# provisioning no borra reglas al desaparecer el archivo original).
+apiVersion: 1
+deleteRules:
+  - orgId: 1
+    uid: ec-out-of-range
+  - orgId: 1
+    uid: ph-out-of-range
+  - orgId: 1
+    uid: level-low

@@ -8,4 +8,5 @@ name: lechuga # nombre del cultivo
 ec_target: [1.2, 1.8] # mS/cm — lechuga poco demandante; >2.0 quema puntas
 ph_target: [5.8, 6.3] # pH óptimo NCT para lechuga en hidroponía
 water_temp: [18, 24] # °C agua — >24 baja O2 y favorece Pythium
+cycle_days: 45 # trasplante → cosecha (hoja suelta, Lambayeque)
 notes: "Lechuga hidropónica de hoja suelta; ciclo ~45 días Lambayeque. EC baja al inicio, subir a 1.6 en engorde. Renovar solución si EC deriva."

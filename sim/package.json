@@ -12,6 +12,7 @@
     "contract": "tsx scripts/contract-check.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "mqtt": "^5.10.1",
     "pg": "^8.13.1",
     "yaml": "^2.6.1",

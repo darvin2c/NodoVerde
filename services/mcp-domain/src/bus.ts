@@ -20,7 +20,7 @@ function getClient(): mqtt.MqttClient {
   return client;
 }
 
-export type ModuleMetaEvent = "module_created" | "module_updated" | "module_retired" | "device_claimed";
+export type ModuleMetaEvent = "module_created" | "module_updated" | "module_retired" | "device_claimed" | "device_unclaimed";
 
 /** Publica evento meta de módulo. No lanza: best-effort (ver header). Timeout 3s — si el broker no responde, la escritura DB ya quedó y el router recupera el nombre en su próximo arranque. */
 export async function publishModuleMeta(tenant: string, moduleId: string, event: ModuleMetaEvent): Promise<void> {

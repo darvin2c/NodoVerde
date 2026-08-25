@@ -62,6 +62,11 @@ export async function getCropProfileDb(name: string): Promise<Record<string, unk
   const r = await queryReadOnly(`SELECT name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes FROM crop_profiles WHERE name = $1`, [name]);
   return r.rows[0] ?? null;
 }
+/** Todos los perfiles de cultivo (fuente del sync de expertos, ADR-0028: una especie por perfil). */
+export async function getCropProfilesDb(): Promise<Record<string, unknown>[]> {
+  const r = await queryReadOnly(`SELECT name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes FROM crop_profiles ORDER BY name`);
+  return r.rows;
+}
 
 // Identidad de la finca: tenants es la única fuente de verdad (cerebro agnóstico).
 export type FarmContextRow = {

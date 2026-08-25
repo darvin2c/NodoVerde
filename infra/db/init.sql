@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 );
 
 -- Crop profiles (ADR-0016 — referencia agronómica aprovisionada en DB; cerebro/portero/expertos
--- leen de aquí en runtime, nunca de YAML. Seed equivalente a sim/config/crops/*.yaml)
+-- leen de aquí en runtime, nunca de YAML. La provisiona el humano vía PWA (create_crop_profile); el sim la siembra vía MCP al arrancar — ADR-0028)
 CREATE TABLE IF NOT EXISTS crop_profiles (
   name TEXT PRIMARY KEY,
   ec_min DOUBLE PRECISION NOT NULL,
@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS devices (
   module TEXT NOT NULL,
   id TEXT NOT NULL,
   kind TEXT NOT NULL,
+  capability TEXT,                 -- actuador: clase de acción (dose_nutrient/dose_ph/fill_water/recirculate); sensor: métrica que alimenta (ec/ph/temp/level/flow/climate); cámara: NULL (ADR-0028)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant, module, id),
   FOREIGN KEY (tenant, module) REFERENCES modules(tenant, id)
@@ -195,12 +196,8 @@ CREATE TABLE IF NOT EXISTS supply_costs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-INSERT INTO supply_costs (supply, unit, cost_per_unit, currency) VALUES
-  ('nutriente_a', 'ml', 0.08, 'PEN'),
-  ('nutriente_b', 'ml', 0.08, 'PEN'),
-  ('ph_down',     'ml', 0.12, 'PEN')
-ON CONFLICT (supply) DO NOTHING;
--- Precios placeholder: el agricultor los actualiza vía set_supply_cost (terra-finance).
+-- Sin seed (ADR-0028): los costos los provisiona el mundo (sim vía finance MCP
+-- set_supply_cost; el humano vía PWA). Tabla nace vacía.
 
 -- ── trigger: validación de imputación (ADR-0011 + ADR-0027) ────────────────
 CREATE OR REPLACE FUNCTION validate_movement_attribution() RETURNS trigger AS $$
@@ -356,83 +353,10 @@ CREATE TRIGGER trg_evidence_immutable_update
   BEFORE UPDATE ON movement_evidence
   FOR EACH ROW EXECUTE FUNCTION enforce_evidence_immutable_update();
 
--- Seed: tenant demo
-INSERT INTO tenants (id, name, location_name, lat, lon, tz) VALUES
-  ('demo', 'Finca Demo', 'Lambayeque, Perú', -6.486, -79.647, 'America/Lima')
-ON CONFLICT (id) DO NOTHING;
-
--- Seed: perfiles de cultivo (fuente de verdad en runtime para cerebro/portero; ADR-0016)
-INSERT INTO crop_profiles (name, ec_min, ec_max, ph_min, ph_max, water_temp_min, water_temp_max, cycle_days, notes) VALUES
-  ('lechuga', 1.2, 1.8, 5.8, 6.3, 18, 24, 45, 'Lechuga hidropónica de hoja suelta; ciclo ~45 días. EC baja al inicio, subir a 1.6 en engorde. Renovar solución si EC deriva.'),
-  ('tomate', 2.0, 3.5, 5.5, 6.5, 18, 26, 90, 'Tomate indeterminado hidropónico; EC se eleva progresivamente con carga de frutos. Vigilar blossom-end rot si EC/pH fuera de rango.')
-ON CONFLICT (name) DO NOTHING;
-
--- Mesas nacen LIBRES (sin cultivo): el cultivo lo pone el lote al abrirse (ADR-0025)
-INSERT INTO modules (tenant, id, name) VALUES
-  ('demo', 'mod-1', 'Mesa Norte'),
-  ('demo', 'mod-2', 'Mesa Sur'),
-  ('demo', 'mod-3', 'Mesa Tomate'),
-  ('demo', 'mod-4', 'Mesa Este')
-ON CONFLICT (tenant, id) DO NOTHING;
-
-INSERT INTO device_identities (hw_id, tenant, module, claimed_by) VALUES
-  ('020000000001', 'demo', 'mod-1', 'seed'),
-  ('020000000002', 'demo', 'mod-2', 'seed'),
-  ('020000000003', 'demo', 'mod-3', 'seed'),
-  ('020000000004', 'demo', 'mod-4', 'seed')
-ON CONFLICT DO NOTHING;
-
--- Seed kit estándar por módulo demo (12 dispositivos por módulo) — Fase 1
-INSERT INTO devices (tenant, module, id, kind) VALUES
-  ('demo', 'mod-1', 'ec-01', 'sensor'),
-  ('demo', 'mod-1', 'ph-01', 'sensor'),
-  ('demo', 'mod-1', 'temp-01', 'sensor'),
-  ('demo', 'mod-1', 'level-01', 'sensor'),
-  ('demo', 'mod-1', 'flow-01', 'sensor'),
-  ('demo', 'mod-1', 'climate-01', 'sensor'),
-  ('demo', 'mod-1', 'pump-recirc-01', 'switch'),
-  ('demo', 'mod-1', 'valve-fill-01', 'switch'),
-  ('demo', 'mod-1', 'doser-a-01', 'switch'),
-  ('demo', 'mod-1', 'doser-b-01', 'switch'),
-  ('demo', 'mod-1', 'doser-ph-01', 'switch'),
-  ('demo', 'mod-1', 'cam-01', 'camera'),
-  ('demo', 'mod-2', 'ec-01', 'sensor'),
-  ('demo', 'mod-2', 'ph-01', 'sensor'),
-  ('demo', 'mod-2', 'temp-01', 'sensor'),
-  ('demo', 'mod-2', 'level-01', 'sensor'),
-  ('demo', 'mod-2', 'flow-01', 'sensor'),
-  ('demo', 'mod-2', 'climate-01', 'sensor'),
-  ('demo', 'mod-2', 'pump-recirc-01', 'switch'),
-  ('demo', 'mod-2', 'valve-fill-01', 'switch'),
-  ('demo', 'mod-2', 'doser-a-01', 'switch'),
-  ('demo', 'mod-2', 'doser-b-01', 'switch'),
-  ('demo', 'mod-2', 'doser-ph-01', 'switch'),
-  ('demo', 'mod-2', 'cam-01', 'camera'),
-  ('demo', 'mod-3', 'ec-01', 'sensor'),
-  ('demo', 'mod-3', 'ph-01', 'sensor'),
-  ('demo', 'mod-3', 'temp-01', 'sensor'),
-  ('demo', 'mod-3', 'level-01', 'sensor'),
-  ('demo', 'mod-3', 'flow-01', 'sensor'),
-  ('demo', 'mod-3', 'climate-01', 'sensor'),
-  ('demo', 'mod-3', 'pump-recirc-01', 'switch'),
-  ('demo', 'mod-3', 'valve-fill-01', 'switch'),
-  ('demo', 'mod-3', 'doser-a-01', 'switch'),
-  ('demo', 'mod-3', 'doser-b-01', 'switch'),
-  ('demo', 'mod-3', 'doser-ph-01', 'switch'),
-  ('demo', 'mod-3', 'cam-01', 'camera'),
-  ('demo', 'mod-4', 'ec-01', 'sensor'),
-  ('demo', 'mod-4', 'ph-01', 'sensor'),
-  ('demo', 'mod-4', 'temp-01', 'sensor'),
-  ('demo', 'mod-4', 'level-01', 'sensor'),
-  ('demo', 'mod-4', 'flow-01', 'sensor'),
-  ('demo', 'mod-4', 'climate-01', 'sensor'),
-  ('demo', 'mod-4', 'pump-recirc-01', 'switch'),
-  ('demo', 'mod-4', 'valve-fill-01', 'switch'),
-  ('demo', 'mod-4', 'doser-a-01', 'switch'),
-  ('demo', 'mod-4', 'doser-b-01', 'switch'),
-  ('demo', 'mod-4', 'doser-ph-01', 'switch'),
-  ('demo', 'mod-4', 'cam-01', 'camera')
-ON CONFLICT (tenant, module, id) DO NOTHING;
+-- Sin seed de mundo (ADR-0028 — plataforma agnóstica): init.sql es SOLO schema.
+-- El mundo demo lo provisiona el sim al arrancar vía APIs gobernadas (create_tenant,
+-- create_module con kit de devices, claim_device, create_crop_profile, set_supply_cost);
+-- en producción lo provisiona el humano vía PWA con las mismas APIs.
 
 -- ── Fase 3 "Lazo cerrado" (ADR-0002/0009/0010/0019/0020) ────────────────────
 

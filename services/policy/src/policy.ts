@@ -2,11 +2,11 @@
 import { randomUUID } from "node:crypto";
 import {
   ACTION_CLASSES,
-  CLASS_SENSOR_DEVICE,
+  CLASS_OBSERVED_METRIC,
   type ActionClass,
 } from "./config.js";
+import { getModuleCapabilities, classOfDevice } from "./capabilities.js";
 import {
-  classifyDevice,
   checkTimeWindow,
   checkConfidence,
   checkHealth,
@@ -76,7 +76,8 @@ async function publishReadRequest(
 export type ProposeInput = {
   tenant: string;
   module: string;
-  device: string;
+  device?: string; // opcional si viene action_class (ADR-0028): el portero elige el dispositivo capaz
+  action_class?: ActionClass;
   action: string;
   params?: Record<string, unknown> | null;
   requested_by: string;
@@ -93,27 +94,47 @@ export type ProposeResult =
 export async function proposeAction(input: ProposeInput): Promise<ProposeResult> {
   const tenant = input.tenant;
   const mod = input.module;
-  const device = input.device;
   const rawAction = input.action;
   const requestedBy = input.requested_by;
   const source = input.source ?? "agent";
+
+  // 0. exactamente uno de device/action_class es requerido (si vienen ambos,
+  //    device manda y se valida coherencia contra su clase provisionada)
+  if (!input.device && !input.action_class) {
+    return { status: "rejected", reason: "device o action_class requerido" };
+  }
 
   // audit: la fila rechazada guarda el MOTIVO del rechazo (y la justificación original si hubo)
   const auditReason = (motive: string): string =>
     input.reason ? `${motive} | propuesta: ${input.reason}` : motive;
 
   // 1. classify
-  const actionClass = classifyDevice(device);
-  if (!actionClass) {
-    // device no actuador → fila rejected? Para MCP, devolver error. Para interceptor, nunca llega aquí.
-    const reason = `dispositivo no actuador: ${device}`;
-    // No insertamos fila si clase desconocida? Insertamos rejected para audit si podemos clasificar? No hay clase.
-    return { status: "rejected", reason };
+  // 1. resolución desde capabilities provisionadas (ADR-0028 — DB, no constante)
+  const caps = await getModuleCapabilities(tenant, mod);
+  let device: string;
+  let actionClass: ActionClass;
+  if (input.device) {
+    const cls = classOfDevice(caps, input.device);
+    if (!cls) {
+      return { status: "rejected", reason: `unknown_device_capability: ${input.device}` };
+    }
+    if (input.action_class && input.action_class !== cls) {
+      return { status: "rejected", reason: `class_mismatch: ${input.device} es ${cls}, no ${input.action_class}` };
+    }
+    device = input.device;
+    actionClass = cls;
+  } else {
+    actionClass = input.action_class!; // validado arriba: exactamente uno presente
+    const capable = caps.classToDevices.get(actionClass)?.[0];
+    if (!capable) {
+      return { status: "rejected", reason: `no_capable_device: ${actionClass} en ${tenant}/${mod}` };
+    }
+    device = capable;
   }
-  const cfg = ACTION_CLASSES[actionClass as ActionClass];
+  const cfg = ACTION_CLASSES[actionClass];
 
   // 2. validate params (normaliza duration_ms, default, etc.)
-  const vres = validateParams(actionClass as ActionClass, rawAction, input.params as Record<string, unknown> | null);
+  const vres = validateParams(actionClass, rawAction, input.params as Record<string, unknown> | null);
   if (!vres.ok) {
     const policyId = `pol-${randomUUID()}`;
     const row = await insertActionRequest({
@@ -212,7 +233,7 @@ export async function proposeAction(input: ProposeInput): Promise<ProposeResult>
   // 5. techo duro (solo acciones que energizan; rangos null si mesa libre —
   //    checkHardCeiling ya tolera crop null, y el techo de nivel no depende del cultivo)
   const ceiling = energizes
-    ? checkHardCeiling(actionClass as ActionClass, readings,
+    ? checkHardCeiling(actionClass, readings,
         modInfo.crop === null
           ? null
           : { ec_min: modInfo.ec_min!, ec_max: modInfo.ec_max!, ph_min: modInfo.ph_min!, ph_max: modInfo.ph_max! })
@@ -279,7 +300,7 @@ export async function proposeAction(input: ProposeInput): Promise<ProposeResult>
   // 8. ventana horaria (solo energizantes)
   const farmNow = new Date();
   const wres = energizes
-    ? checkTimeWindow(actionClass as ActionClass, farmNow, modInfo.tz ?? undefined)
+    ? checkTimeWindow(actionClass, farmNow, modInfo.tz ?? undefined)
     : ({ ok: true } as const);
   if (!wres.ok) {
     const row = await insertActionRequest({
@@ -300,7 +321,7 @@ export async function proposeAction(input: ProposeInput): Promise<ProposeResult>
 
   // 9. confianza (solo energizantes: apagar no requiere saber EC/nivel)
   const cres = energizes
-    ? checkConfidence(confidenceSources, actionClass as ActionClass)
+    ? checkConfidence(confidenceSources, actionClass)
     : ({ ok: true } as const);
   if (!cres.ok) {
     const row = await insertActionRequest({
@@ -317,7 +338,7 @@ export async function proposeAction(input: ProposeInput): Promise<ProposeResult>
       confidence: confidenceSnapshot as unknown as Record<string, unknown> | null,
     });
     // publicar request/read al sensor de la clase
-    const sensor = CLASS_SENSOR_DEVICE[actionClass as ActionClass];
+    const sensor = caps.metricToDevice.get(CLASS_OBSERVED_METRIC[actionClass]);
     if (sensor) {
       await publishReadRequest(tenant, mod, sensor).catch(() => {});
     }
@@ -453,7 +474,7 @@ export async function approveAction(
     const cres = checkConfidence(confEntry?.sources ?? null, actionClass);
     if (!cres.ok) {
       // NO actualizar fila, queda pending
-      const sensor = CLASS_SENSOR_DEVICE[actionClass];
+      const sensor = (await getModuleCapabilities(tenant, mod)).metricToDevice.get(CLASS_OBSERVED_METRIC[actionClass]);
       if (sensor) await publishReadRequest(tenant, mod, sensor).catch(() => {});
       const msg = buildPolicyMessage("needs_data", tenant, mod, { needs: cres.needs, actionClass });
       void postPolicyEvent("needs_data", tenant, mod, msg);

@@ -1,6 +1,6 @@
-# MEMORY — Experto lechuga
+# MEMORY — Experto {{ESPECIE}}
 
-Memoria experiencial del experto de lechuga. Formato obligatorio por entrada:
+Memoria experiencial del experto de {{ESPECIE}}. Formato obligatorio por entrada:
 
 ```
 YYYY-MM-DD · <módulo> · <perfil/variedad>: observación o lección (fuente: telemetría/foto/humano, confianza)

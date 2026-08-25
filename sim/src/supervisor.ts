@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import pg from "pg";
 import { loadFinca } from "./config.js";
-import { nextHwId, nextModuleId } from "./lab.js";
+import { nextHwId, } from "./lab.js";
+import { ensureWorld, claimNode, unclaimNode, waitMcp } from "./provision.js";
 
 const args = process.argv.slice(2);
 const port = parseInt(process.env.SUPERVISOR_PORT ?? "7750", 10);
@@ -83,35 +84,9 @@ async function spawnNode(hwId: string): Promise<void> {
 // --- claiming: el acto del dueño (stand-in del chat hasta Fase 2) ---
 // ADR-0025: claiming solo amarra fierro ↔ mesa. El cultivo JAMÁS se escribe aquí:
 // es caché del ciclo del lote (lo pone open_batch vía MCP, lo limpia close_batch).
-async function claim(hwId: string): Promise<{ tenant: string; module: string }> {
-  // módulo libre = existe pero NINGÚN hardware lo ocupa;
-  // se toma el de menor número (rellena huecos); si no hay, se crea el siguiente
-  const { rows: free } = await pool.query(
-    `SELECT m.id FROM modules m
-      WHERE m.tenant = $1
-        AND NOT EXISTS (SELECT 1 FROM device_identities d WHERE d.tenant = m.tenant AND d.module = m.id)
-      ORDER BY m.id LIMIT 1`,
-    [tenant],
-  );
-  let moduleId: string;
-  if (free.length) {
-    moduleId = free[0].id;
-  } else {
-    const { rows } = await pool.query(
-      `SELECT id FROM (SELECT id FROM modules WHERE tenant = $1
-                       UNION SELECT module AS id FROM device_identities WHERE tenant = $1) t`,
-      [tenant],
-    );
-    const nums = rows.map((r: { id: string }) => parseInt(r.id.replace("mod-", ""), 10)).filter((n: number) => !isNaN(n));
-    moduleId = nextModuleId(nums);
-    await pool.query("INSERT INTO modules (tenant, id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [tenant, moduleId]);
-  }
-  await pool.query(
-    "INSERT INTO device_identities (hw_id, tenant, module, claimed_by) VALUES ($1, $2, $3, 'ctl') ON CONFLICT (hw_id) DO UPDATE SET tenant = $2, module = $3, claimed_by = 'ctl'",
-    [hwId, tenant, moduleId],
-  );
-  return { tenant, module: moduleId };
-}
+// Claiming/unclaiming (ADR-0028): el supervisor NO escribe SQL — toda la
+// escritura pasa por las APIs gobernadas (mcp-domain) vía provision.ts.
+// La DB solo se lee (syncCropsFromBatches, y las consultas read-only de provision).
 
 // --- sync de cultivos desde lotes (ADR-0025): la única vía del cultivo al mundo ---
 // Abrir lote (MCP) → plantas en la mesa; cerrar lote → cosecha, mesa libre.
@@ -156,10 +131,6 @@ async function syncCropsFromBatches(): Promise<void> {
   }
 }
 
-async function unclaim(hwId: string): Promise<void> {
-  await pool.query("DELETE FROM device_identities WHERE hw_id = $1", [hwId]);
-}
-
 // --- control HTTP ---
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -200,7 +171,7 @@ const server = createServer((req, res) => {
           body: JSON.stringify({ hw_id: hwId }),
         });
         if (!addRes.ok) return send(addRes.status, await addRes.json());
-        const claimed = await claim(hwId);
+        const claimed = await claimNode(pool, tenant, hwId, "ctl");
         await spawnNode(hwId);
         send(201, { hw_id: hwId, ...claimed, crop: null });
       } catch (e) {
@@ -232,7 +203,7 @@ const server = createServer((req, res) => {
           child.kill("SIGKILL");
         }
         await fetch(`${physicsUrl}/api/nodes/${hwId}`, { method: "DELETE" });
-        if (b.unclaim) await unclaim(hwId);
+        if (b.unclaim) await unclaimNode(hwId);
         send(200, { ok: true, hw_id: hwId, unclaimed: !!b.unclaim });
       } catch (e) {
         send(400, { error: String(e) });
@@ -243,23 +214,16 @@ const server = createServer((req, res) => {
 });
 
 // --- arranque ---
-// Aprovisionamiento (ADR-0016): la identidad de la finca (nombre/zona/coords/tz)
-// se escribe UNA vez desde el mundo físico (este yaml) hacia tenants, que es la
-// fuente de verdad que consulta el cerebro vía MCP. Idempotente.
-async function provisionTenant(): Promise<void> {
-  const name = `Finca ${tenant.charAt(0).toUpperCase()}${tenant.slice(1)}`;
-  await pool.query(
-    `INSERT INTO tenants (id, name, location_name, lat, lon, tz) VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (id) DO UPDATE SET location_name = $3, lat = $4, lon = $5, tz = $6`,
-    [tenant, name, finca.location.name, finca.location.lat, finca.location.lon, finca.location.tz],
-  );
-  console.log(`[supervisor] tenant ${tenant} provisionado: ${finca.location.name} (${finca.location.tz})`);
-}
-
+// Aprovisionamiento (ADR-0028): el mundo entra por APIs gobernadas (MCP), no
+// por SQL. La identidad de la finca (ADR-0016) la escribe create_tenant — la tz
+// la deriva el servidor de lat/lon (tz-lookup, ADR-0023); el yaml ya no la provisiona.
 console.log(`[supervisor] mundo: ${finca.modules.length} nodos, tenant=${tenant}`);
-await provisionTenant();
 spawnChild("physics", "src/physics/engine.ts", []);
 await waitPhysics();
+// el stack compose puede ir más lento que el sim en host — esperar a ambos MCP
+await waitMcp();
+await waitMcp(process.env.FINANCE_URL ?? "http://localhost:7761");
+await ensureWorld(finca, pool);
 for (const m of finca.modules) await spawnNode(m.hw_id);
 // sync inicial de cultivos desde lotes abiertos + poll cada 5s (ADR-0025)
 await syncCropsFromBatches().catch((e) => console.error("[supervisor] sync crop inicial falló:", e));

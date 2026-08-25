@@ -46,7 +46,6 @@ services:
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./infra/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./infra/db/migrations/002-fase1.sql:/docker-entrypoint-initdb.d/02-fase1.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-terra} -d ${POSTGRES_DB:-terra}"]
       interval: 10s
