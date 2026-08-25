@@ -12,6 +12,8 @@ __pycache__/
 # --- Estado y datos generados (reproducibles) ---
 # estado persistido del sim + caché de clima
 sim/data/
+# snapshots pg_dump de scripts/backup.sh
+backups/
 # datos del bucket
 minio/data/
 homeassistant/config/
